@@ -147,7 +147,7 @@ export default function CounterpartyFromFlowPage() {
                     </TableCell>
                   </TableRow>
                 )}
-                (tab === "supplier" ? suppliers : customers).map((item) => (
+                {(tab === "supplier" ? suppliers : customers).map((item) => (
                   <TableRow key={item.name}>
                     <TableCell className="font-medium">{item.name}</TableCell>
                     <TableCell className="text-right text-red-600">

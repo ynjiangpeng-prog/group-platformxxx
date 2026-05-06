@@ -1,7 +1,7 @@
-import { useState, useRef, useMemo, useCallback, useEffect } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect, lazy, Suspense } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Upload, Wand, Trash2, Link, Loader2, FileUp, Tag, GitBranch, CheckSquare, Filter, ChevronUp, ChevronDown, X } from "lucide-react";
+import { Upload, Wand, Trash2, Link, Loader2, FileUp, Tag, GitBranch, CheckSquare, Filter, ChevronUp, ChevronDown, X, CreditCard, BookOpen } from "lucide-react";
 import { format } from "date-fns";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,11 @@ import * as chargingApi from "@/api/charging";
 import type { BankTransaction, AnnotationSuggestion } from "@/api/finance";
 import type { FundFlowNode } from "@/api/finance";
 
+const CardMode = lazy(() => import("./bank/CardMode"))
+const RuleMode = lazy(() => import("./bank/RuleMode"))
+
+type ViewMode = "table" | "card" | "rule"
+
 const FUND_LEVEL_LABELS: Record<number, { label: string; color: string }> = {
   1: { label: "公户", color: "bg-blue-100 text-blue-700" },
   2: { label: "个人卡", color: "bg-orange-100 text-orange-700" },
@@ -33,6 +38,7 @@ type SortDir = "asc" | "desc";
 
 export default function BankTransactionPage() {
   const qc = useQueryClient();
+  const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [keyword, setKeyword] = useState("");
   const [keywordInput, setKeywordInput] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -275,11 +281,55 @@ export default function BankTransactionPage() {
   const totalIncome = items.reduce((s, t) => s + (t.tx_amount > 0 ? t.tx_amount : 0), 0);
   const totalExpense = items.reduce((s, t) => s + (t.tx_amount < 0 ? Math.abs(t.tx_amount) : 0), 0);
 
+  // Tab view modes
+  if (viewMode === "card") {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold">银行流水</h1>
+          <div className="flex gap-1 border rounded-lg p-1 ml-4">
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("table")}>表格</Button>
+            <Button variant="default" size="sm"><CreditCard className="size-3.5 mr-1" />卡片标注</Button>
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("rule")}>规则管理</Button>
+          </div>
+        </div>
+        <Suspense fallback={<div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin" /></div>}>
+          <CardMode />
+        </Suspense>
+      </div>
+    )
+  }
+
+  if (viewMode === "rule") {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold">银行流水</h1>
+          <div className="flex gap-1 border rounded-lg p-1 ml-4">
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("table")}>表格</Button>
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("card")}>卡片标注</Button>
+            <Button variant="default" size="sm"><BookOpen className="size-3.5 mr-1" />规则管理</Button>
+          </div>
+        </div>
+        <Suspense fallback={<div className="flex justify-center py-20"><Loader2 className="size-6 animate-spin" /></div>}>
+          <RuleMode />
+        </Suspense>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-3">
       {/* Toolbar */}
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">银行流水</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold">银行流水</h1>
+          <div className="flex gap-1 border rounded-lg p-1 ml-4">
+            <Button variant="default" size="sm">表格</Button>
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("card")}><CreditCard className="size-3.5 mr-1" />卡片标注</Button>
+            <Button variant="ghost" size="sm" onClick={() => setViewMode("rule")}><BookOpen className="size-3.5 mr-1" />规则管理</Button>
+          </div>
+        </div>
         <div className="flex gap-2">
           {selectedIds.size > 0 && (
             <Button variant="outline" onClick={openBatchAnnotate}>

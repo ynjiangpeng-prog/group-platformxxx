@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from datetime import date, datetime, timedelta
@@ -13,9 +14,14 @@ from app.models.erp import Customer, Supplier
 from app.models.finance import ArApRecord
 from app.models.organization import User
 from app.models.project import BankTransaction
-from app.models.project.models import CompanyEntity, ProjectLine
+from app.models.project.models import CompanyEntity, ProjectLine, Project
+from app.models.intelligence.models import BusinessKnowledge
 from app.services.bank_import import BankImportService
 from app.services.bank_cascade import capture_tx_snapshot, cascade_on_annotate, cascade_on_delete
+from app.services.rule_engine import (
+    load_annotation_rules, apply_rules_to_transactions, transaction_matches_rule,
+    generate_rule_from_transaction, evaluate_condition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1591,3 +1597,382 @@ async def cross_entity_fund_flow(
         "pair_flows": pair_flows[:200],
         "total_flow_count": len(pair_flows),
     }
+
+
+# ============================================================
+# Annotation Rule Endpoints
+# ============================================================
+
+class FieldConditionModel(BaseModel):
+    operator: str = "contains"
+    value: str
+
+class RuleConditionsModel(BaseModel):
+    counterparty: FieldConditionModel | None = None
+    summary: FieldConditionModel | None = None
+    purpose: FieldConditionModel | None = None
+    counterparty_account: FieldConditionModel | None = None
+    account_name: FieldConditionModel | None = None
+    tx_amount_min: float | None = None
+    tx_amount_max: float | None = None
+    tx_type: str | None = None
+    entity_id: str | None = None
+
+class RuleActionsModel(BaseModel):
+    expense_type: str | None = None
+    expense_subtype: str | None = None
+    project_id: str | None = None
+    contract_id: str | None = None
+    remark: str | None = None
+    tags: list | None = None
+
+class AnnotationRuleCreate(BaseModel):
+    rule_name: str = Field(..., min_length=1)
+    conditions: RuleConditionsModel
+    actions: RuleActionsModel
+    priority: int = 0
+    is_active: bool = True
+
+class AnnotationRuleUpdate(BaseModel):
+    rule_name: str | None = None
+    conditions: RuleConditionsModel | None = None
+    actions: RuleActionsModel | None = None
+    priority: int | None = None
+    is_active: bool | None = None
+
+class CardAnnotationModel(BaseModel):
+    expense_type: str | None = None
+    expense_subtype: str | None = None
+    project_id: str | None = None
+    quick_project_name: str | None = None
+    contract_id: str | None = None
+    remark: str | None = None
+    tags: list | None = None
+    create_rule_from_this: bool = False
+
+
+@router.get("/annotation-rules")
+async def list_annotation_rules(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rules = await load_annotation_rules(db, str(current_user.company_id), active_only=False)
+    return {"success": True, "data": rules}
+
+
+@router.post("/annotation-rules")
+async def create_annotation_rule(
+    body: AnnotationRuleCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rule_value = {
+        "version": 2,
+        "rule_name": body.rule_name,
+        "conditions": body.conditions.model_dump(exclude_none=True),
+        "actions": body.actions.model_dump(exclude_none=True),
+        "is_active": body.is_active,
+        "priority": body.priority,
+        "match_count": 0,
+    }
+    rule = BusinessKnowledge(
+        company_id=current_user.company_id,
+        category="annotation_rule",
+        key=body.rule_name,
+        value=rule_value,
+        created_by=str(current_user.id),
+    )
+    db.add(rule)
+    await db.flush()
+
+    # Preview match count
+    conditions_raw = body.conditions.model_dump(exclude_none=True)
+    unannotated = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.expense_type == None,
+        ).limit(5000)
+    )).scalars().all()
+    preview_count = sum(1 for tx in unannotated if transaction_matches_rule(tx, rule_value))
+
+    return {
+        "success": True,
+        "data": {"rule_id": str(rule.id), **rule_value, "preview_count": preview_count},
+    }
+
+
+@router.put("/annotation-rules/{rule_id}")
+async def update_annotation_rule(
+    rule_id: str,
+    body: AnnotationRuleUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rule = (await db.execute(
+        select(BusinessKnowledge).where(
+            BusinessKnowledge.id == rule_id,
+            BusinessKnowledge.company_id == current_user.company_id,
+            BusinessKnowledge.is_deleted == False,
+        )
+    )).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(404, "规则不存在")
+
+    current = rule.value if isinstance(rule.value, dict) else json.loads(rule.value)
+    if body.rule_name is not None:
+        current["rule_name"] = body.rule_name
+        rule.key = body.rule_name
+    if body.conditions is not None:
+        current["conditions"] = body.conditions.model_dump(exclude_none=True)
+    if body.actions is not None:
+        current["actions"] = body.actions.model_dump(exclude_none=True)
+    if body.priority is not None:
+        current["priority"] = body.priority
+    if body.is_active is not None:
+        current["is_active"] = body.is_active
+    rule.value = current
+    await db.flush()
+    return {"success": True, "data": current}
+
+
+@router.delete("/annotation-rules/{rule_id}")
+async def delete_annotation_rule(
+    rule_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rule = (await db.execute(
+        select(BusinessKnowledge).where(
+            BusinessKnowledge.id == rule_id,
+            BusinessKnowledge.company_id == current_user.company_id,
+        )
+    )).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(404, "规则不存在")
+    rule.is_deleted = True
+    await db.flush()
+    return {"success": True, "message": "规则已删除"}
+
+
+@router.post("/annotation-rules/{rule_id}/preview")
+async def preview_annotation_rule(
+    rule_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rule = (await db.execute(
+        select(BusinessKnowledge).where(
+            BusinessKnowledge.id == rule_id,
+            BusinessKnowledge.company_id == current_user.company_id,
+            BusinessKnowledge.is_deleted == False,
+        )
+    )).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(404, "规则不存在")
+
+    rule_value = rule.value if isinstance(rule.value, dict) else json.loads(rule.value)
+    unannotated = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.expense_type == None,
+        ).limit(5000)
+    )).scalars().all()
+
+    matched = [tx for tx in unannotated if transaction_matches_rule(tx, rule_value)]
+    return {
+        "success": True,
+        "match_count": len(matched),
+        "matched_transactions": [
+            {
+                "id": str(tx.id), "tx_date": str(tx.tx_date), "tx_amount": float(tx.tx_amount or 0),
+                "counterparty": tx.counterparty, "summary": tx.summary,
+            }
+            for tx in matched[:50]
+        ],
+    }
+
+
+@router.post("/annotation-rules/{rule_id}/apply")
+async def apply_single_rule(
+    rule_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rule = (await db.execute(
+        select(BusinessKnowledge).where(
+            BusinessKnowledge.id == rule_id,
+            BusinessKnowledge.company_id == current_user.company_id,
+            BusinessKnowledge.is_deleted == False,
+        )
+    )).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(404, "规则不存在")
+
+    rule_value = rule.value if isinstance(rule.value, dict) else json.loads(rule.value)
+    if not rule_value.get("is_active", True):
+        raise HTTPException(400, "规则未激活")
+
+    unannotated = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.expense_type == None,
+        ).limit(5000)
+    )).scalars().all()
+
+    result = await apply_rules_to_transactions(db, unannotated, [rule_value], dry_run=False)
+    await db.commit()
+    return {"success": True, **result}
+
+
+@router.post("/annotation-rules/apply-all")
+async def apply_all_rules(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rules = await load_annotation_rules(db, str(current_user.company_id), active_only=True)
+    unannotated = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.expense_type == None,
+        ).limit(5000)
+    )).scalars().all()
+
+    result = await apply_rules_to_transactions(db, unannotated, rules, dry_run=False)
+    await db.commit()
+    return {"success": True, **result}
+
+
+@router.get("/transactions/unannotated")
+async def list_unannotated_transactions(
+    entity_id: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(BankTransaction).where(
+        BankTransaction.company_id == current_user.company_id,
+        BankTransaction.is_deleted == False,
+        BankTransaction.expense_type == None,
+    ).order_by(BankTransaction.tx_date.desc())
+
+    if entity_id:
+        query = query.where(BankTransaction.entity_id == entity_id)
+
+    total_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(total_q)).scalar() or 0
+
+    items = (await db.execute(query.offset(offset).limit(limit))).scalars().all()
+    return {
+        "items": [
+            {
+                "id": str(tx.id), "tx_date": str(tx.tx_date),
+                "tx_amount": float(tx.tx_amount or 0), "balance": float(tx.balance or 0),
+                "counterparty": tx.counterparty, "summary": tx.summary,
+                "purpose": tx.purpose, "tx_type": tx.tx_type,
+                "account_name": tx.account_name, "account_no": tx.account_no,
+                "bank_name": tx.bank_name, "counterparty_account": tx.counterparty_account,
+                "entity_id": str(tx.entity_id) if tx.entity_id else None,
+                "fund_level": tx.fund_level, "source": tx.source,
+            }
+            for tx in items
+        ],
+        "total": total,
+    }
+
+
+@router.post("/transactions/{tx_id}/annotate-card")
+async def annotate_card(
+    tx_id: str,
+    body: CardAnnotationModel,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tx = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.id == tx_id,
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+        )
+    )).scalar_one_or_none()
+    if not tx:
+        raise HTTPException(404, "交易不存在")
+
+    # Quick project creation
+    project_id = body.project_id
+    if not project_id and body.quick_project_name:
+        project = Project(
+            company_id=current_user.company_id,
+            created_by=str(current_user.id),
+            name=body.quick_project_name,
+            project_type="construction",
+            status="planning",
+        )
+        db.add(project)
+        await db.flush()
+        project_id = str(project.id)
+
+    # Apply annotation
+    snapshot = await capture_tx_snapshot(tx)
+    if body.expense_type:
+        tx.expense_type = body.expense_type
+    if body.expense_subtype:
+        tx.expense_subtype = body.expense_subtype
+    if project_id:
+        tx.project_id = project_id
+    if body.contract_id:
+        tx.contract_id = body.contract_id
+    if body.remark:
+        tx.remark = body.remark
+    if body.tags:
+        tx.tags = body.tags
+
+    # Create rule from this annotation if requested
+    rule_id = None
+    if body.create_rule_from_this:
+        rule_value = generate_rule_from_transaction(tx, body.model_dump())
+        rule = BusinessKnowledge(
+            company_id=current_user.company_id,
+            category="annotation_rule",
+            key=rule_value["rule_name"],
+            value=rule_value,
+            created_by=str(current_user.id),
+        )
+        db.add(rule)
+        await db.flush()
+        rule_id = str(rule.id)
+
+    await cascade_on_annotate(tx, snapshot, db)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "标注成功",
+        "project_id": project_id,
+        "rule_id": rule_id,
+    }
+
+
+@router.get("/expense-types")
+async def get_expense_types():
+    types = {
+        "车队收款": ["充电服务费", "充电电费", "月租"],
+        "电费收入": ["电费收入", "充电费"],
+        "电费支出": ["电费支出", "购电"],
+        "差旅费": ["差旅交通"],
+        "备用金": ["备用金支出"],
+        "工资薪酬": ["工资", "社保", "公积金"],
+        "材料采购": ["变压器供货", "电缆供货", "充电桩供货", "电气材料供货"],
+        "工程施工": ["土建施工", "高压安装", "低压安装", "附属设施建设"],
+        "设备销售": ["设备销售"],
+        "租赁费": ["租地"],
+        "运营费": ["运营", "合作方分成"],
+        "税费": ["税费"],
+        "其他": ["其他"],
+    }
+    return {"success": True, "data": types}
+
