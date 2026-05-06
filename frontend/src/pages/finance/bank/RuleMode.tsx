@@ -157,7 +157,6 @@ function RuleEditor({
       const ruleId = (result as any)?.data?.rule_id
       if (ruleId) {
         // Delete the preview rule and show count
-        const { del } = await import("@/api/annotationRules")
         await deleteAnnotationRule(ruleId)
         setPreviewCount((result as any)?.data?.preview_count ?? 0)
       }
@@ -186,7 +185,7 @@ function RuleEditor({
               <div key={i} className="flex gap-2 items-center">
                 <Select value={row.field} onValueChange={(v) => {
                   const next = [...conditions]
-                  next[i] = { ...next[i], field: v }
+                  next[i] = { ...next[i], field: v ?? "" }
                   setConditions(next)
                 }}>
                   <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
@@ -196,7 +195,7 @@ function RuleEditor({
                 </Select>
                 <Select value={row.operator} onValueChange={(v) => {
                   const next = [...conditions]
-                  next[i] = { ...next[i], operator: v }
+                  next[i] = { ...next[i], operator: v ?? "" }
                   setConditions(next)
                 }}>
                   <SelectTrigger className="w-20"><SelectValue /></SelectTrigger>
@@ -236,7 +235,7 @@ function RuleEditor({
             {/* Tx Type */}
             <div className="flex gap-3 items-center">
               <Label className="text-xs shrink-0">收支方向</Label>
-              <Select value={txType} onValueChange={setTxType}>
+              <Select value={txType} onValueChange={(v) => setTxType(v ?? "")}>
                 <SelectTrigger className="w-32"><SelectValue placeholder="不限" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="income">仅收入</SelectItem>
@@ -252,7 +251,7 @@ function RuleEditor({
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label className="text-xs">用途分类</Label>
-                <Select value={expType} onValueChange={(v) => { setExpType(v); setExpSubtype("") }}>
+                <Select value={expType} onValueChange={(v) => { setExpType(v ?? ""); setExpSubtype("") }}>
                   <SelectTrigger><SelectValue placeholder="选择用途" /></SelectTrigger>
                   <SelectContent>
                     {Object.keys(expenseTypes).map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
@@ -261,7 +260,7 @@ function RuleEditor({
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">细分类</Label>
-                <Select value={expSubtype} onValueChange={setExpSubtype}>
+                <Select value={expSubtype} onValueChange={(v) => setExpSubtype(v ?? "")}>
                   <SelectTrigger><SelectValue placeholder="选择细分" /></SelectTrigger>
                   <SelectContent>
                     {(expenseTypes[expType] ?? []).map((s: string) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
@@ -271,7 +270,7 @@ function RuleEditor({
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs">关联项目</Label>
-              <Select value={projectId} onValueChange={setProjectId}>
+              <Select value={projectId} onValueChange={(v) => setProjectId(v ?? "")}>
                 <SelectTrigger><SelectValue placeholder="选择项目（可选）" /></SelectTrigger>
                 <SelectContent>
                   {projects.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}

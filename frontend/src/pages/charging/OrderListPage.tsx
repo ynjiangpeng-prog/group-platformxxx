@@ -307,7 +307,7 @@ export default function OrderListPage() {
     const m: Record<string, string[]> = {}
     for (const col of columns) {
       if (col.type === "enum") {
-        const vals = new Set(items.map((i) => String((i as Record<string, unknown>)[col.key] ?? "")).filter(Boolean))
+        const vals = new Set(items.map((i) => String((i as unknown as Record<string, unknown>)[col.key] ?? "")).filter(Boolean))
         m[col.key] = Array.from(vals)
       }
     }
@@ -353,7 +353,7 @@ export default function OrderListPage() {
   const hasActiveFilters = stationFilter !== "all" || Object.values(filterMap).some((v) => v && v !== "all")
 
   const renderCellValue = (item: OrderRow, col: ColDef) => {
-    const raw = (item as Record<string, unknown>)[col.key]
+    const raw = (item as unknown as Record<string, unknown>)[col.key]
     switch (col.type) {
       case "currency":
         return fmtCurrency(raw as number | null)

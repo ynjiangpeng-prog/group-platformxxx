@@ -254,8 +254,7 @@ export default function CardMode() {
               {/* Expense Type */}
               <div className="space-y-1.5">
                 <Label className="text-xs">用途分类</Label>
-                <Select value={form.expense_type} onValueChange={(v) => setForm((f) => ({ ...f, expense_type: v, expense_subtype: "" }))}>
-                  <SelectTrigger><SelectValue placeholder="选择用途" /></SelectTrigger>
+                <Select value={form.expense_type} onValueChange={(v) => setForm((f) => ({ ...f, expense_type: v ?? "", expense_subtype: "" }))}>                  <SelectTrigger><SelectValue placeholder="选择用途" /></SelectTrigger>
                   <SelectContent>
                     {Object.keys(types).map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
                   </SelectContent>
@@ -264,7 +263,7 @@ export default function CardMode() {
               {/* Subtype */}
               <div className="space-y-1.5">
                 <Label className="text-xs">细分类</Label>
-                <Select value={form.expense_subtype} onValueChange={(v) => setForm((f) => ({ ...f, expense_subtype: v }))}>
+                <Select value={form.expense_subtype} onValueChange={(v) => setForm((f) => ({ ...f, expense_subtype: v ?? "" }))}>
                   <SelectTrigger><SelectValue placeholder="选择细分" /></SelectTrigger>
                   <SelectContent>
                     {(types[form.expense_type] ?? []).map((s: string) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
@@ -277,7 +276,7 @@ export default function CardMode() {
             <div className="space-y-1.5">
               <Label className="text-xs">关联项目</Label>
               <div className="flex gap-2">
-                <Select value={form.project_id} onValueChange={(v) => setForm((f) => ({ ...f, project_id: v }))}>
+                <Select value={form.project_id} onValueChange={(v) => setForm((f) => ({ ...f, project_id: v ?? "" }))}>
                   <SelectTrigger className="flex-1"><SelectValue placeholder="选择项目" /></SelectTrigger>
                   <SelectContent>
                     {projects.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}

@@ -207,7 +207,7 @@ async def apply_rules_to_transactions(
                         current = db_rule.value if isinstance(db_rule.value, dict) else json.loads(db_rule.value)
                         current["match_count"] = rule.get("match_count", 0)
                         current["last_matched_at"] = rule.get("last_matched_at")
-                        db_rule.value = current
+                        db_rule.value = json.dumps(current, ensure_ascii=False)
                 except Exception as e:
                     logger.warning(f"Failed to update rule stats: {e}")
         await db.flush()

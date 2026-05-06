@@ -1303,81 +1303,6 @@ async def import_bank_file(
     return result
 
 
-@router.get("/annotation-rules")
-async def list_annotation_rules(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """List saved counterparty mapping rules"""
-    from app.models.intelligence.models import BusinessKnowledge
-    import json as _json
-    
-    rules = (await db.execute(
-        select(BusinessKnowledge).where(
-            BusinessKnowledge.category == "counterparty_mapping",
-            BusinessKnowledge.is_deleted == False,
-            BusinessKnowledge.company_id == current_user.company_id,
-        ).order_by(BusinessKnowledge.created_at.desc())
-    )).scalars().all()
-    
-    items = []
-    for r in rules:
-        try:
-            mapping = _json.loads(r.value) if isinstance(r.value, str) else (r.value or {})
-            items.append({
-                "id": str(r.id),
-                "name": r.key,
-                "conditions": {
-                    "counterparty": mapping.get("counterparty"),
-                    "summary": mapping.get("summary"),
-                    "purpose": mapping.get("purpose"),
-                    "min_amount": mapping.get("min_amount"),
-                    "max_amount": mapping.get("max_amount"),
-                },
-                "actions": {
-                    "expense_type": mapping.get("expense_type"),
-                    "expense_subtype": mapping.get("expense_subtype"),
-                    "project_id": mapping.get("project_id"),
-                    "contract_id": mapping.get("contract_id"),
-                },
-                "is_active": r.is_active,
-                "usage_count": r.usage_count,
-                "last_used_at": str(r.last_used_at) if r.last_used_at else None,
-                "created_at": str(r.created_at) if r.created_at else None,
-            })
-        except Exception:
-            continue
-    
-    return {"items": items, "total": len(items)}
-
-
-@router.delete("/annotation-rules/{rule_id}")
-async def delete_annotation_rule(
-    rule_id: str,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Delete a saved rule"""
-    from app.models.intelligence.models import BusinessKnowledge
-    
-    rule = (await db.execute(
-        select(BusinessKnowledge).where(
-            BusinessKnowledge.id == rule_id,
-            BusinessKnowledge.company_id == current_user.company_id,
-            BusinessKnowledge.is_deleted == False,
-        )
-    )).scalar_one_or_none()
-    
-    if not rule:
-        raise HTTPException(404, "规则不存在")
-    
-    rule.is_deleted = True
-    rule.updated_by = current_user.id
-    await db.flush()
-    
-    return {"message": "规则已删除"}
-
-
 @router.get("/counterparty-summary")
 async def counterparty_summary(
     current_user: User = Depends(get_current_user),
@@ -1679,7 +1604,7 @@ async def create_annotation_rule(
         company_id=current_user.company_id,
         category="annotation_rule",
         key=body.rule_name,
-        value=rule_value,
+        value=json.dumps(rule_value, ensure_ascii=False),
         created_by=str(current_user.id),
     )
     db.add(rule)
@@ -1731,7 +1656,7 @@ async def update_annotation_rule(
         current["priority"] = body.priority
     if body.is_active is not None:
         current["is_active"] = body.is_active
-    rule.value = current
+    rule.value = json.dumps(current, ensure_ascii=False)
     await db.flush()
     return {"success": True, "data": current}
 
@@ -1813,6 +1738,11 @@ async def apply_single_rule(
     rule_value = rule.value if isinstance(rule.value, dict) else json.loads(rule.value)
     if not rule_value.get("is_active", True):
         raise HTTPException(400, "规则未激活")
+
+    rule_value["_rule_id"] = str(rule.id)
+    rule_value["_rule_name"] = rule_value.get("rule_name", rule.key or "unnamed")
+    rule_value["_category"] = "annotation_rule"
+    rule_value["_priority"] = rule_value.get("priority", 0)
 
     unannotated = (await db.execute(
         select(BankTransaction).where(
@@ -1905,10 +1835,12 @@ async def annotate_card(
     # Quick project creation
     project_id = body.project_id
     if not project_id and body.quick_project_name:
+        code = generate_no("PJ")
         project = Project(
             company_id=current_user.company_id,
             created_by=str(current_user.id),
             name=body.quick_project_name,
+            project_code=code,
             project_type="construction",
             status="planning",
         )
@@ -1917,7 +1849,7 @@ async def annotate_card(
         project_id = str(project.id)
 
     # Apply annotation
-    snapshot = await capture_tx_snapshot(tx)
+    snapshot = capture_tx_snapshot(tx)
     if body.expense_type:
         tx.expense_type = body.expense_type
     if body.expense_subtype:
@@ -1939,14 +1871,14 @@ async def annotate_card(
             company_id=current_user.company_id,
             category="annotation_rule",
             key=rule_value["rule_name"],
-            value=rule_value,
+            value=json.dumps(rule_value, ensure_ascii=False),
             created_by=str(current_user.id),
         )
         db.add(rule)
         await db.flush()
         rule_id = str(rule.id)
 
-    await cascade_on_annotate(tx, snapshot, db)
+    await cascade_on_annotate(tx, snapshot, db, str(current_user.company_id), str(current_user.id))
     await db.commit()
 
     return {
