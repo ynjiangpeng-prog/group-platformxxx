@@ -1,0 +1,463 @@
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps.auth import get_current_user, get_db
+from app.models.charging import ChargingStation, StationFinancialMonthly
+from app.models.finance import ArApRecord
+from app.models.organization import Company, User
+from app.models.project import Project, ServiceTicket
+from app.models.system.models import OperationLog, SystemConfigKV
+from app.models.system.notification import Notification
+from app.models.workflow import WorkflowInstance
+
+from app.services.linkage import get_group_consolidated_stats, check_contract_expiry
+
+router = APIRouter(prefix="/system", tags=["系统管理"])
+
+
+@router.get("/logs")
+async def list_logs(
+    module: str | None = None,
+    action: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(OperationLog).where(OperationLog.company_id == current_user.company_id)
+    if module:
+        query = query.where(OperationLog.module == module)
+    if action:
+        query = query.where(OperationLog.action == action)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
+    query = query.order_by(OperationLog.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    items = [{
+        "id": str(r.id), "username": r.username, "module": r.module,
+        "action": r.action, "target_type": r.target_type, "target_id": r.target_id,
+        "detail": r.detail, "ip": r.ip, "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in result.scalars().all()]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/dashboard/stats")
+async def dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cid = current_user.company_id
+    company = (await db.execute(select(Company).where(Company.id == cid))).scalar_one_or_none()
+    company_type = company.company_type if company else "group"
+
+    active_projects = (await db.execute(
+        select(func.count()).select_from(
+            select(Project).where(Project.is_deleted == False, Project.company_id == cid, Project.status.in_(["in_progress", "active"])).subquery()
+        )
+    )).scalar() or 0
+
+    active_stations = (await db.execute(
+        select(func.count()).select_from(
+            select(ChargingStation).where(ChargingStation.is_deleted == False, ChargingStation.company_id == cid, ChargingStation.status == "operating").subquery()
+        )
+    )).scalar() or 0
+
+    pending_approvals = (await db.execute(
+        select(func.count()).select_from(
+            select(WorkflowInstance).where(WorkflowInstance.is_deleted == False, WorkflowInstance.company_id == cid, WorkflowInstance.status == "pending").subquery()
+        )
+    )).scalar() or 0
+
+    total_ar = (await db.execute(
+        select(func.coalesce(func.sum(ArApRecord.remaining_amount), 0)).where(
+            ArApRecord.is_deleted == False, ArApRecord.company_id == cid, ArApRecord.type == "ar"
+        )
+    )).scalar() or 0
+
+    overdue_ar = (await db.execute(
+        select(func.coalesce(func.sum(ArApRecord.remaining_amount), 0)).where(
+            ArApRecord.is_deleted == False, ArApRecord.company_id == cid, ArApRecord.type == "ar",
+            ArApRecord.due_date < func.current_date(), ArApRecord.remaining_amount > 0,
+        )
+    )).scalar() or 0
+
+    pending_tickets = (await db.execute(
+        select(func.count()).select_from(
+            select(ServiceTicket).where(
+                ServiceTicket.is_deleted == False, ServiceTicket.company_id == cid,
+                ServiceTicket.status.in_(["open", "in_progress"]),
+            ).subquery()
+        )
+    )).scalar() or 0
+
+    total_ap = (await db.execute(
+        select(func.coalesce(func.sum(ArApRecord.remaining_amount), 0)).where(
+            ArApRecord.is_deleted == False, ArApRecord.company_id == cid, ArApRecord.type == "ap"
+        )
+    )).scalar() or 0
+
+    return {
+        "active_projects": active_projects,
+        "active_stations": active_stations,
+        "pending_approvals": pending_approvals,
+        "total_ar": float(total_ar),
+        "overdue_ar": float(overdue_ar),
+        "total_ap": float(total_ap),
+        "pending_tickets": pending_tickets,
+        "company_type": company_type,
+    }
+
+
+@router.get("/dashboard/charts")
+async def dashboard_charts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cid = current_user.company_id
+
+    status_counts = (await db.execute(
+        select(Project.status, func.count(Project.id))
+        .where(Project.is_deleted == False, Project.company_id == cid)
+        .group_by(Project.status)
+    )).all()
+    project_status = [{"name": {"active": "进行中", "completed": "已完成", "planning": "待启动"}.get(s, s), "value": c} for s, c in status_counts]
+
+    current_month = func.to_char(func.current_date(), "YYYY-MM")
+    monthly = (await db.execute(
+        select(
+            func.coalesce(func.sum(StationFinancialMonthly.total_revenue), 0),
+            func.coalesce(func.sum(StationFinancialMonthly.total_kwh), 0),
+        )
+        .join(ChargingStation, ChargingStation.id == StationFinancialMonthly.station_id)
+        .where(
+            ChargingStation.is_deleted == False, ChargingStation.company_id == cid,
+            StationFinancialMonthly.month == current_month,
+        )
+    )).first()
+    station_monthly = {"revenue": float(monthly[0] or 0), "kwh": float(monthly[1] or 0)}
+
+    six_months_rows = (await db.execute(
+        select(
+            StationFinancialMonthly.month,
+            func.coalesce(func.sum(StationFinancialMonthly.total_revenue), 0),
+            func.coalesce(func.sum(StationFinancialMonthly.total_kwh), 0),
+        )
+        .join(ChargingStation, ChargingStation.id == StationFinancialMonthly.station_id)
+        .where(
+            ChargingStation.is_deleted == False, ChargingStation.company_id == cid,
+            StationFinancialMonthly.month >= func.to_char(func.current_date() - func.make_interval(0, 5), "YYYY-MM"),
+        )
+        .group_by(StationFinancialMonthly.month)
+    )).all()
+    month_map = {str(row[0]): {"month": str(row[0])[-2:] + "月", "revenue": float(row[1] or 0), "kwh": float(row[2] or 0)} for row in six_months_rows}
+    six_months = []
+    for i in range(5, -1, -1):
+        label = func.to_char(func.current_date() - func.make_interval(0, i), "YYYY-MM")
+        label_str = (await db.execute(select(func.to_char(func.current_date() - func.make_interval(0, i), "YYYY-MM")))).scalar()
+        six_months.append(month_map.get(label_str, {"month": label_str[-2:] + "月" if label_str else "", "revenue": 0.0, "kwh": 0.0}))
+
+    pending_tickets = (await db.execute(
+        select(func.count()).select_from(
+            select(ServiceTicket).where(
+                ServiceTicket.is_deleted == False, ServiceTicket.company_id == cid,
+                ServiceTicket.status.in_(["open", "in_progress"]),
+            ).subquery()
+        )
+    )).scalar() or 0
+
+    return {
+        "project_status": project_status,
+        "station_monthly": station_monthly,
+        "station_6months": six_months,
+        "pending_tickets": pending_tickets,
+    }
+
+
+class SystemConfig(BaseModel):
+    company_name: str = "集团管理平台"
+    enable_workflow: bool = True
+    enable_erp: bool = True
+    enable_finance: bool = True
+    enable_charging: bool = True
+
+
+@router.get("/config")
+async def get_config(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(SystemConfigKV))
+    rows = result.scalars().all()
+    return {row.key: row.value for row in rows}
+
+
+@router.put("/config")
+async def update_config(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    for key, value in body.items():
+        if not isinstance(key, str) or not isinstance(value, (str, bool, int, float)):
+            continue
+        existing = await db.execute(
+            select(SystemConfigKV).where(SystemConfigKV.key == key)
+        )
+        row = existing.scalar_one_or_none()
+        if row:
+            row.value = str(value)
+        else:
+            db.add(SystemConfigKV(key=key, value=str(value), category="general"))
+    await db.flush()
+
+    import os
+    ai_key = body.get("ai_api_key")
+    if ai_key and isinstance(ai_key, str):
+        os.environ["AI_API_KEY"] = ai_key
+        os.environ["ZHIPUAI_API_KEY"] = ai_key
+        from app.services.ai_gateway import ai_gateway
+        ai_gateway.provider.api_key = ai_key
+        if ai_gateway.provider._client:
+            await ai_gateway.provider.close()
+            ai_gateway.provider._client = None
+
+    ai_vision = body.get("ai_vision_model")
+    ai_reasoning = body.get("ai_reasoning_model")
+    if ai_vision or ai_reasoning:
+        from app.services.ai_gateway import TASK_MODELS
+        if ai_vision and isinstance(ai_vision, str):
+            TASK_MODELS["ocr_vision"] = ai_vision
+            TASK_MODELS["ocr_extract"] = ai_vision
+        if ai_reasoning and isinstance(ai_reasoning, str):
+            TASK_MODELS["reasoning"] = ai_reasoning
+            TASK_MODELS["chat"] = ai_reasoning
+
+    return body
+
+
+@router.get("/notifications")
+async def list_notifications(
+    category: str | None = None,
+    is_read: bool | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Notification).where(
+        Notification.user_id == current_user.id,
+        Notification.company_id == current_user.company_id,
+    )
+    if category:
+        query = query.where(Notification.category == category)
+    if is_read is not None:
+        query = query.where(Notification.is_read == is_read)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
+    unread_count = (await db.execute(
+        select(func.count()).select_from(Notification).where(
+            Notification.user_id == current_user.id,
+            Notification.company_id == current_user.company_id,
+            Notification.is_read == False,
+        )
+    )).scalar()
+    query = query.order_by(Notification.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    items = [{
+        "id": str(n.id), "category": n.category, "title": n.title,
+        "content": n.content, "link": n.link, "is_read": n.is_read,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    } for n in result.scalars().all()]
+    return {"items": items, "total": total, "unread_count": unread_count, "page": page, "page_size": page_size}
+
+
+@router.put("/notifications/{nid}/read")
+async def mark_notification_read(nid: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await db.execute(update(Notification).where(Notification.id == nid, Notification.user_id == current_user.id).values(is_read=True))
+    return {"message": "已读"}
+
+
+@router.put("/notifications/read-all")
+async def mark_all_notifications_read(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await db.execute(update(Notification).where(
+        Notification.user_id == current_user.id,
+        Notification.company_id == current_user.company_id,
+        Notification.is_read == False,
+    ).values(is_read=True))
+    return {"message": "全部已读"}
+
+
+
+
+async def _fetch_linkage_summary(db, target_type: str | None, target_id: str | None) -> str:
+    if not target_type or not target_id:
+        return ""
+    try:
+        if target_type == "ar_ap":
+            from app.models.finance.models import ArApRecord
+            r = await db.execute(select(ArApRecord).where(ArApRecord.id == target_id))
+            obj = r.scalar_one_or_none()
+            if obj:
+                t = "应收" if obj.type == "ar" else "应付"
+                s = f"{t} | {obj.counterparty or '-'} | ¥{float(obj.total_amount or 0):,.2f}"
+                if obj.remark:
+                    s += f" | {obj.remark[:30]}"
+                return s
+        elif target_type == "invoice":
+            from app.models.finance.models import Invoice
+            r = await db.execute(select(Invoice).where(Invoice.id == target_id))
+            obj = r.scalar_one_or_none()
+            if obj:
+                return f"{obj.seller_name or '-'} → {obj.buyer_name or '-'} | ¥{float(obj.total_amount or 0):,.2f}"
+        elif target_type == "contract":
+            from app.models.erp.models import Contract
+            r = await db.execute(select(Contract).where(Contract.id == target_id))
+            obj = r.scalar_one_or_none()
+            if obj:
+                cp = getattr(obj, 'counterparty', None) or obj.party_a or obj.party_b or "-"
+                return f"{obj.name[:40]} | {cp} | ¥{float(obj.total_amount or 0):,.2f}"
+        elif target_type == "bank_transaction":
+            from app.models.project.models import BankTransaction
+            r = await db.execute(select(BankTransaction).where(BankTransaction.id == target_id))
+            obj = r.scalar_one_or_none()
+            if obj:
+                return f"{getattr(obj, 'counterparty', '-') or '-'} | ¥{float(getattr(obj, 'amount', 0) or 0):,.2f}"
+    except Exception:
+        pass
+    return ""
+
+
+@router.get("/linkages/pending")
+async def get_pending_linkages(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Notification).where(
+            Notification.company_id == current_user.company_id,
+            Notification.category == "linkage",
+            Notification.is_read == False,
+        ).order_by(Notification.created_at.desc())
+    )
+    items = []
+    for n in result.scalars().all():
+        try:
+            data = json.loads(n.content) if n.content else {}
+        except Exception:
+            data = {}
+        summary = data.get("summary", "")
+        if not summary:
+            summary = await _fetch_linkage_summary(db, data.get("target_type"), data.get("target_id"))
+        items.append({
+            "id": str(n.id), "title": n.title,
+            "target_type": data.get("target_type"), "target_id": data.get("target_id"),
+            "suggested_project_id": data.get("suggested_project_id"),
+            "confidence": data.get("confidence", 0), "method": data.get("method", ""),
+            "matched_project_name": data.get("matched_project_name", ""),
+            "summary": summary,
+            "created_at": n.created_at.isoformat() if n.created_at else None,
+        })
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/linkages/{nid}/confirm")
+async def confirm_linkage(
+    nid: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    project_id = body.get("project_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="需要project_id")
+
+    notif_result = await db.execute(
+        select(Notification).where(Notification.id == nid, Notification.company_id == current_user.company_id)
+    )
+    notif = notif_result.scalar_one_or_none()
+    if not notif:
+        raise HTTPException(status_code=404, detail="关联记录不存在")
+
+    try:
+        data = json.loads(notif.content) if notif.content else {}
+    except Exception:
+        data = {}
+
+    target_type = data.get("target_type")
+    target_id = data.get("target_id")
+
+    model_map = {
+        "invoice": "app.models.finance.models.Invoice",
+        "ar_ap": "app.models.finance.models.ArApRecord",
+        "expense": "app.models.business.models.DailyExpense",
+        "contract": "app.models.erp.models.Contract",
+        "charging_order": "app.models.charging.models.ChargingOrder",
+    }
+    if target_type in model_map and target_id:
+        import importlib
+        module_path, class_name = model_map[target_type].rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        model_cls = getattr(mod, class_name)
+        await db.execute(
+            update(model_cls).where(model_cls.id == target_id).values(project_id=project_id)
+        )
+
+    notif.is_read = True
+    return {"message": "关联确认成功", "target_type": target_type, "target_id": target_id, "project_id": project_id}
+
+
+@router.get("/dashboard")
+async def dashboard(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    cid = current_user.company_id
+    company = (await db.execute(select(Company).where(Company.id == cid))).scalar_one_or_none()
+    is_group = company and company.company_type == "group"
+
+    if is_group:
+        consolidated = await get_group_consolidated_stats(db)
+        expiry_alerts = await check_contract_expiry(db)
+        consolidated["expiry_alerts"] = expiry_alerts[:5]
+        return {"mode": "group", **consolidated}
+
+    active_projects = (await db.execute(
+        select(func.count()).select_from(
+            select(Project).where(Project.is_deleted == False, Project.company_id == cid, Project.status.in_(["in_progress", "active"])).subquery()
+        )
+    )).scalar() or 0
+
+    active_stations = (await db.execute(
+        select(func.count()).select_from(
+            select(ChargingStation).where(ChargingStation.is_deleted == False, ChargingStation.company_id == cid, ChargingStation.status == "operating").subquery()
+        )
+    )).scalar() or 0
+
+    total_ar = float((await db.execute(
+        select(func.coalesce(func.sum(ArApRecord.remaining_amount), 0)).where(
+            ArApRecord.is_deleted == False, ArApRecord.company_id == cid, ArApRecord.type == "ar"
+        )
+    )).scalar() or 0)
+
+    total_ap = float((await db.execute(
+        select(func.coalesce(func.sum(ArApRecord.remaining_amount), 0)).where(
+            ArApRecord.is_deleted == False, ArApRecord.company_id == cid, ArApRecord.type == "ap"
+        )
+    )).scalar() or 0)
+
+    station_revenue = float((await db.execute(
+        select(func.coalesce(func.sum(StationFinancialMonthly.total_revenue), 0)).where(
+            StationFinancialMonthly.company_id == cid, StationFinancialMonthly.is_deleted == False
+        )
+    )).scalar() or 0)
+
+    return {
+        "mode": "subsidiary",
+        "active_projects": active_projects,
+        "active_stations": active_stations,
+        "total_ar": total_ar,
+        "total_ap": total_ap,
+        "revenue": station_revenue,
+    }

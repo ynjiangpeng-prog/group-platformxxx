@@ -1,0 +1,7 @@
+export const formGrid = "grid grid-cols-2 gap-4 [&>*]:min-w-0"
+export const formGrid3 = "grid grid-cols-3 gap-4 [&>*]:min-w-0"
+export const formGrid4 = "grid grid-cols-4 gap-4 [&>*]:min-w-0"
+export const formField = "space-y-1.5 min-w-0"
+export const formLabel = "text-sm font-medium text-foreground whitespace-nowrap"
+export const dialogContent = "max-w-3xl max-h-[85vh] overflow-y-auto"
+export const dialogContentWide = "max-w-4xl max-h-[85vh] overflow-y-auto"

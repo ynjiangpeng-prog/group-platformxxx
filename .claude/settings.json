@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash D:/group/sync_to_cloud.sh --no-restart",
+            "timeout": 120,
+            "statusMessage": "Syncing to cloud...",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash D:/group/sync_to_cloud.sh",
+            "timeout": 120,
+            "statusMessage": "Final sync to cloud with restart..."
+          }
+        ]
+      }
+    ]
+  }
+}

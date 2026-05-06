@@ -1,0 +1,1 @@
+SELECT id, entity_name FROM company_entities WHERE entity_name IN ('姜鹏', '聂志平') AND is_deleted = false;
