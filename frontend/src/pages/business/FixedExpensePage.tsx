@@ -43,7 +43,7 @@ export default function FixedExpensePage() {
 
   const openCreate = () => { setForm(defaultForm); setEditId(null); setDialogOpen(true); };
   const openEdit = (item: any) => { setForm({ name: item.name ?? "", category: item.category ?? "", amount: String(item.amount ?? ""), frequency: item.frequency ?? "monthly", start_date: item.start_date ?? "", end_date: item.end_date ?? "", next_due_date: item.next_due_date ?? "", payee: item.payee ?? "", auto_record: !!item.auto_record, status: item.status ?? "active", project_id: item.project_id ?? "", station_id: item.station_id ?? "" }); setEditId(item.id); setDialogOpen(true); };
-  const submit = () => { const payload = { ...form, amount: Number(form.amount) || 0 }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
+  const submit = () => { const payload = { ...form, amount: Number(form.amount) || 0, start_date: form.start_date || undefined, end_date: form.end_date || undefined, next_due_date: form.next_due_date || undefined, project_id: form.project_id || undefined, station_id: form.station_id || undefined }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

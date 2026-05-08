@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Plus, Pencil, Trash2, Loader2 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -10,6 +11,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
+import { get, post, put, del } from "@/lib/http"
+import { toast } from "sonner"
 
 const MEMO_TYPE_LABELS: Record<string, string> = {
   maintenance: "维护",
@@ -44,56 +47,100 @@ const STATUS_VARIANTS: Record<string, "default" | "secondary" | "outline" | "des
   closed: "secondary",
 }
 
-const EMPTY_FORM = {
-  title: "",
-  station_id: "",
-  memo_type: "maintenance",
-  content: "",
-  priority: "normal",
-  status: "open",
-  created_by: "",
-}
-
-type FormType = typeof EMPTY_FORM
-
 interface Memo {
   id: string
+  title: string
+  station_id: string | null
+  memo_type: string
+  content: string | null
+  priority: string
+  status: string
+  created_by: string | null
+  created_at: string
+}
+
+interface MemoForm {
   title: string
   station_id: string
   memo_type: string
   content: string
   priority: string
   status: string
-  created_by: string
-  created_at: string
 }
 
-const PAGE_SIZE = 20
+const EMPTY_FORM: MemoForm = {
+  title: "",
+  station_id: "",
+  memo_type: "maintenance",
+  content: "",
+  priority: "normal",
+  status: "open",
+}
 
 export default function OperationMemoPage() {
-  const [data, setData] = useState<Memo[]>([])
   const [page, setPage] = useState(1)
-  const [stationFilter, setStationFilter] = useState("")
   const [typeFilter, setTypeFilter] = useState("all")
   const [statusFilter, setStatusFilter] = useState("all")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Memo | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Memo | null>(null)
-  const [form, setForm] = useState<FormType>(EMPTY_FORM)
-  const [submitting, setSubmitting] = useState(false)
+  const [form, setForm] = useState<MemoForm>(EMPTY_FORM)
+  const queryClient = useQueryClient()
 
-  const filtered = data.filter((item) => {
-    if (typeFilter !== "all" && item.memo_type !== typeFilter) return false
-    if (statusFilter !== "all" && item.status !== statusFilter) return false
-    if (stationFilter && item.station_id !== stationFilter) return false
-    return true
+  const { data, isLoading } = useQuery({
+    queryKey: ["operation-memos", page, typeFilter, statusFilter],
+    queryFn: () =>
+      get<{ items: Memo[]; total: number }>(
+        "/charging/operation-memos",
+        {
+          page,
+          page_size: 20,
+          ...(typeFilter !== "all" ? { memo_type: typeFilter } : {}),
+          ...(statusFilter !== "all" ? { status: statusFilter } : {}),
+        },
+      ),
   })
 
-  const total = filtered.length
-  const totalPages = Math.ceil(total / PAGE_SIZE) || 1
-  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const createMutation = useMutation({
+    mutationFn: (d: Record<string, unknown>) => post("/charging/operation-memos", d),
+    onSuccess: () => {
+      toast.success("备忘创建成功")
+      queryClient.invalidateQueries({ queryKey: ["operation-memos"] })
+      setDialogOpen(false)
+    },
+    onError: () => toast.error("创建失败"),
+  })
 
-  const stationSet = new Set(data.map((item) => item.station_id).filter(Boolean))
+  const updateMutation = useMutation({
+    mutationFn: ({ id, d }: { id: string; d: Record<string, unknown> }) =>
+      put(`/charging/operation-memos/${id}`, d),
+    onSuccess: () => {
+      toast.success("备忘更新成功")
+      queryClient.invalidateQueries({ queryKey: ["operation-memos"] })
+      setDialogOpen(false)
+    },
+    onError: () => toast.error("更新失败"),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => del(`/charging/operation-memos/${id}`),
+    onSuccess: () => {
+      toast.success("备忘已删除")
+      queryClient.invalidateQueries({ queryKey: ["operation-memos"] })
+      setDeleteTarget(null)
+    },
+    onError: () => toast.error("删除失败"),
+  })
+
+  const statusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) =>
+      put(`/charging/operation-memos/${id}`, { status }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["operation-memos"] }),
+  })
+
+  const items = data?.items ?? []
+  const total = data?.total ?? 0
+  const totalPages = Math.ceil(total / 20) || 1
 
   const openCreate = () => {
     setForm(EMPTY_FORM)
@@ -104,12 +151,11 @@ export default function OperationMemoPage() {
   const openEdit = (item: Memo) => {
     setForm({
       title: item.title,
-      station_id: item.station_id,
-      memo_type: item.memo_type,
-      content: item.content,
-      priority: item.priority,
-      status: item.status,
-      created_by: item.created_by,
+      station_id: item.station_id || "",
+      memo_type: item.memo_type || "maintenance",
+      content: item.content || "",
+      priority: item.priority || "normal",
+      status: item.status || "open",
     })
     setEditing(item)
     setDialogOpen(true)
@@ -117,41 +163,25 @@ export default function OperationMemoPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    setSubmitting(true)
-    setTimeout(() => {
-      if (editing) {
-        setData((prev) =>
-          prev.map((item) =>
-            item.id === editing.id ? { ...item, ...form } : item
-          )
-        )
-      } else {
-        const newItem: Memo = {
-          id: crypto.randomUUID(),
-          ...form,
-          created_at: new Date().toISOString(),
-        }
-        setData((prev) => [newItem, ...prev])
-      }
-      setSubmitting(false)
-      setDialogOpen(false)
-    }, 300)
+    const payload: Record<string, unknown> = {
+      title: form.title,
+      station_id: form.station_id || null,
+      memo_type: form.memo_type,
+      content: form.content || null,
+      priority: form.priority,
+      status: form.status,
+    }
+    if (editing) {
+      updateMutation.mutate({ id: editing.id, d: payload })
+    } else {
+      createMutation.mutate(payload)
+    }
   }
 
-  const handleDelete = () => {
-    if (!deleteTarget) return
-    setData((prev) => prev.filter((item) => item.id !== deleteTarget.id))
-    setDeleteTarget(null)
-  }
-
-  const handleStatusChange = (id: string, newStatus: string) => {
-    setData((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, status: newStatus } : item))
-    )
-  }
-
-  const set = (key: keyof FormType) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+  const set = (key: keyof MemoForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setForm((prev) => ({ ...prev, [key]: e.target.value }))
+
+  const submitting = createMutation.isPending || updateMutation.isPending
 
   return (
     <div className="space-y-4">
@@ -164,23 +194,8 @@ export default function OperationMemoPage() {
           </Button>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-            接口开发中，当前数据仅保存在本地
-          </div>
-
           <div className="flex items-center gap-3 flex-wrap">
-            <Select value={stationFilter || "all"} onValueChange={(v) => { setStationFilter(v === "all" ? "" : v ?? ""); setPage(1) }}>
-              <SelectTrigger className="w-40">
-                <SelectValue placeholder="全部站点" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部站点</SelectItem>
-                {Array.from(stationSet).map((sid) => (
-                  <SelectItem key={sid} value={sid}>{sid}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={typeFilter} onValueChange={(v) => { setTypeFilter(v ?? ""); setPage(1) }}>
+            <Select value={typeFilter} onValueChange={(v) => { setTypeFilter(v ?? "all"); setPage(1) }}>
               <SelectTrigger className="w-32">
                 <SelectValue placeholder="全部类型" />
               </SelectTrigger>
@@ -191,7 +206,7 @@ export default function OperationMemoPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v ?? ""); setPage(1) }}>
+            <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v ?? "all"); setPage(1) }}>
               <SelectTrigger className="w-32">
                 <SelectValue placeholder="全部状态" />
               </SelectTrigger>
@@ -202,74 +217,71 @@ export default function OperationMemoPage() {
                 ))}
               </SelectContent>
             </Select>
+            <span className="text-sm text-muted-foreground">共 {total} 条</span>
           </div>
 
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>标题</TableHead>
-                <TableHead>站点</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead>优先级</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>创建人</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {paged.length === 0 && (
+          {isLoading ? (
+            <div className="flex justify-center py-8"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>
+          ) : items.length === 0 ? (
+            <div className="text-center text-muted-foreground py-8">暂无备忘数据，点击"新增备忘"开始</div>
+          ) : (
+            <Table>
+              <TableHeader>
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">暂无数据</TableCell>
+                  <TableHead>标题</TableHead>
+                  <TableHead>类型</TableHead>
+                  <TableHead>优先级</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
                 </TableRow>
-              )}
-              {paged.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell className="font-medium max-w-[160px] truncate">{item.title}</TableCell>
-                  <TableCell>{item.station_id || "-"}</TableCell>
-                  <TableCell>{MEMO_TYPE_LABELS[item.memo_type] ?? item.memo_type}</TableCell>
-                  <TableCell>
-                    <Badge variant={PRIORITY_VARIANTS[item.priority] ?? "secondary"}>
-                      {PRIORITY_LABELS[item.priority] ?? item.priority}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <select
-                      className="border rounded-md px-2 py-1 text-xs bg-background"
-                      value={item.status}
-                      onChange={(e) => handleStatusChange(item.id, e.target.value)}
-                    >
-                      {Object.entries(STATUS_LABELS).map(([k, v]) => (
-                        <option key={k} value={k}>{v}</option>
-                      ))}
-                    </select>
-                  </TableCell>
-                  <TableCell>{item.created_by || "-"}</TableCell>
-                  <TableCell className="whitespace-nowrap">{item.created_at ? new Date(item.created_at).toLocaleString("zh-CN") : "-"}</TableCell>
-                  <TableCell className="text-right">
-                    <Button variant="ghost" size="icon-sm" onClick={() => openEdit(item)}>
-                      <Pencil className="size-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(item)}>
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {items.map((item) => (
+                  <TableRow key={item.id}>
+                    <TableCell className="font-medium max-w-[200px] truncate">{item.title}</TableCell>
+                    <TableCell>{MEMO_TYPE_LABELS[item.memo_type] ?? item.memo_type}</TableCell>
+                    <TableCell>
+                      <Badge variant={PRIORITY_VARIANTS[item.priority] ?? "secondary"}>
+                        {PRIORITY_LABELS[item.priority] ?? item.priority}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <select
+                        className="border rounded-md px-2 py-1 text-xs bg-background"
+                        value={item.status}
+                        onChange={(e) => statusMutation.mutate({ id: item.id, status: e.target.value })}
+                      >
+                        {Object.entries(STATUS_LABELS).map(([k, v]) => (
+                          <option key={k} value={k}>{v}</option>
+                        ))}
+                      </select>
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap">
+                      {item.created_at ? new Date(item.created_at).toLocaleString("zh-CN") : "-"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="ghost" size="icon-sm" onClick={() => openEdit(item)}>
+                        <Pencil className="size-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(item)}>
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
 
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">共 {total} 条</span>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-                上一页
-              </Button>
-              <span className="text-sm">{page} / {totalPages}</span>
-              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-                下一页
-              </Button>
-            </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+              上一页
+            </Button>
+            <span className="text-sm">{page} / {totalPages}</span>
+            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+              下一页
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -281,23 +293,13 @@ export default function OperationMemoPage() {
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label>标题</Label>
+              <Label>标题 *</Label>
               <Input value={form.title} onChange={set("title")} required />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>站点ID（可选）</Label>
-                <Input value={form.station_id} onChange={set("station_id")} placeholder="留空为公司级" />
-              </div>
-              <div className="space-y-2">
-                <Label>创建人</Label>
-                <Input value={form.created_by} onChange={set("created_by")} />
-              </div>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="space-y-2">
                 <Label>类型</Label>
-                <Select value={form.memo_type} onValueChange={(v) => setForm((f) => ({ ...f, memo_type: v ?? "" }))}>
+                <Select value={form.memo_type} onValueChange={(v) => setForm((f) => ({ ...f, memo_type: v ?? "maintenance" }))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {Object.entries(MEMO_TYPE_LABELS).map(([k, v]) => (
@@ -308,7 +310,7 @@ export default function OperationMemoPage() {
               </div>
               <div className="space-y-2">
                 <Label>优先级</Label>
-                <Select value={form.priority} onValueChange={(v) => setForm((f) => ({ ...f, priority: v ?? "" }))}>
+                <Select value={form.priority} onValueChange={(v) => setForm((f) => ({ ...f, priority: v ?? "normal" }))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {Object.entries(PRIORITY_LABELS).map(([k, v]) => (
@@ -319,7 +321,7 @@ export default function OperationMemoPage() {
               </div>
               <div className="space-y-2">
                 <Label>状态</Label>
-                <Select value={form.status} onValueChange={(v) => setForm((f) => ({ ...f, status: v ?? "" }))}>
+                <Select value={form.status} onValueChange={(v) => setForm((f) => ({ ...f, status: v ?? "open" }))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {Object.entries(STATUS_LABELS).map(([k, v]) => (
@@ -328,6 +330,10 @@ export default function OperationMemoPage() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label>站点ID（可选）</Label>
+              <Input value={form.station_id} onChange={set("station_id")} placeholder="留空为公司级" />
             </div>
             <div className="space-y-2">
               <Label>内容</Label>
@@ -352,7 +358,7 @@ export default function OperationMemoPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>删除</AlertDialogAction>
+            <AlertDialogAction onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}>删除</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

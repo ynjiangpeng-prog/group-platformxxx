@@ -29,7 +29,7 @@ export default function PermitPage() {
 
   function openCreate() { setEditId(null); setForm(defaultForm); setDialogOpen(true); }
   function openEdit(p: any) { setEditId(p.id); setForm({ project: p.project ?? "", permit_type: p.permit_type ?? "", permit_no: p.permit_no ?? "", permit_name: p.permit_name ?? "", issuing_authority: p.issuing_authority ?? "", apply_date: p.apply_date ?? "", approve_date: p.approve_date ?? "", status: p.status ?? "pending", description: p.description ?? "" }); setDialogOpen(true); }
-  function submit() { editId ? updateMut.mutate({ id: editId, ...form }) : createMut.mutate(form); }
+  function submit() { const payload = { ...form, apply_date: form.apply_date || undefined, approve_date: form.approve_date || undefined }; editId ? updateMut.mutate({ id: editId, ...payload }) : createMut.mutate(payload); }
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

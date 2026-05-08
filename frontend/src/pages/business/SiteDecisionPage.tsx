@@ -87,7 +87,7 @@ export default function SiteDecisionPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={() => createMut.mutate({ ...form, investment_amount: Number(form.investment_amount) || 0 })} disabled={createMut.isPending}>提交</Button>
+            <Button onClick={() => createMut.mutate({ ...form, investment_amount: Number(form.investment_amount) || 0, decision_date: form.decision_date || undefined, description: form.description || undefined })} disabled={createMut.isPending}>提交</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -134,7 +134,7 @@ export default function BudgetPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={() => createMut.mutate({ ...form, total_budget: Number(form.total_budget) || 0 })} disabled={createMut.isPending}>提交</Button>
+            <Button onClick={() => createMut.mutate({ ...form, total_budget: Number(form.total_budget) || 0, department_id: form.department_id || undefined, project_id: form.project_id || undefined })} disabled={createMut.isPending}>提交</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

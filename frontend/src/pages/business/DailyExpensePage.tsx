@@ -46,7 +46,7 @@ export default function DailyExpensePage() {
 
   const openCreate = () => { setForm(defaultForm); setEditId(null); setDialogOpen(true); };
   const openEdit = (item: any) => { setForm({ project_id: item.project_id ?? "", expense_date: item.expense_date ?? "", category: item.category ?? "", amount: String(item.amount ?? ""), description: item.description ?? "", payer_type: item.payer_type ?? "", payer_id: item.payer_id ?? "", payer_name: item.payer_name ?? "", station_id: item.station_id ?? "" }); setEditId(item.id); setDialogOpen(true); };
-  const submit = () => { const payload = { ...form, amount: Number(form.amount) || 0 }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
+  const submit = () => { const payload = { ...form, amount: Number(form.amount) || 0, expense_date: form.expense_date || undefined, project_id: form.project_id || undefined, payer_type: form.payer_type || undefined, payer_id: form.payer_id || undefined, station_id: form.station_id || undefined }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

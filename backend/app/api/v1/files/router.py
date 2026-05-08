@@ -12,6 +12,28 @@ import io
 router = APIRouter(prefix="/files", tags=["文件管理"])
 
 
+@router.get("/list")
+async def list_files(
+    folder: str = Query("uploads"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        objects = await file_storage.list_files(folder)
+        total = len(objects)
+        start = (page - 1) * page_size
+        page_items = objects[start:start + page_size]
+        return {
+            "items": page_items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    except Exception:
+        return {"items": [], "total": 0, "page": page, "page_size": page_size}
+
+
 @router.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),

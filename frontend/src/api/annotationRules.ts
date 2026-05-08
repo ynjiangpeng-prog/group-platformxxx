@@ -102,4 +102,7 @@ export const annotateCard = (txId: string, data: {
 }) => post<{ success: boolean; project_id?: string; rule_id?: string }>(`/finance/bank/transactions/${txId}/annotate-card`, data)
 
 export const getExpenseTypes = () =>
-  get<{ success: boolean; data: Record<string, string[]> }>('/finance/bank/expense-types')
+  get<Record<string, string[]>>('/finance/bank/expense-types')
+
+export const addExpenseType = (data: { name: string; subtypes?: string[] }) =>
+  post<{ success: boolean; name: string }>('/finance/bank/expense-types', data)

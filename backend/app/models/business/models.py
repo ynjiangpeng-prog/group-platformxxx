@@ -1,5 +1,7 @@
-from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from datetime import datetime
+
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TenantBase
@@ -170,3 +172,54 @@ class TravelExpense(TenantBase):
     description: Mapped[str | None] = mapped_column(Text)
     receipt_url: Mapped[str | None] = mapped_column(String(500))
     ocr_result: Mapped[dict | None] = mapped_column(JSONB)
+
+
+# ─── 业务数字孪生 ───
+
+class BizEvent(TenantBase):
+    """业务事件流 — 所有业务变更的统一记录"""
+    __tablename__ = "biz_events"
+
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    source_module: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(String(100))
+    event_data: Mapped[dict | None] = mapped_column(JSONB)
+    event_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    amount: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    entity_ids: Mapped[list | None] = mapped_column(ARRAY(String))
+
+
+class BizEntity(TenantBase):
+    """业务实体 — 统一管理公司/项目/合同/供应商/客户等实体"""
+    __tablename__ = "biz_entities"
+
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    entity_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    properties: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    tags: Mapped[list | None] = mapped_column(ARRAY(String))
+
+
+class BizRelation(TenantBase):
+    """业务实体关系 — 知识图谱的边"""
+    __tablename__ = "biz_relations"
+
+    source_entity_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    target_entity_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    relation_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    properties: Mapped[dict | None] = mapped_column(JSONB)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+
+class BizMetric(TenantBase):
+    """业务指标快照 — 每日/每周/每月聚合"""
+    __tablename__ = "biz_metrics"
+
+    metric_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    period: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    period_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    value: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    dimensions: Mapped[dict | None] = mapped_column(JSONB)

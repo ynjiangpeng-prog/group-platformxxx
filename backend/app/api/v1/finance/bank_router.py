@@ -14,6 +14,7 @@ from app.models.erp import Customer, Supplier
 from app.models.finance import ArApRecord
 from app.models.organization import User
 from app.models.project import BankTransaction
+from app.models.system.models import SystemConfigKV
 from app.models.project.models import CompanyEntity, ProjectLine, Project
 from app.models.intelligence.models import BusinessKnowledge
 from app.services.bank_import import BankImportService
@@ -461,9 +462,96 @@ async def delete_bank_transaction(
 
 
 @router.get("/expense-types")
-@cached(ttl=3600, prefix="bank")
-async def get_expense_types():
-    return EXPENSE_TYPES
+async def get_expense_types(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """动态费用类型：合并硬编码默认值 + 数据库已用值 + 用户自定义"""
+    import json as _json
+    result = dict(EXPENSE_TYPES)
+
+    # 1. 从 system_config 读取用户自定义类型
+    cfg = (await db.execute(
+        select(SystemConfigKV).where(SystemConfigKV.key == "custom_expense_types")
+    )).scalar_one_or_none()
+    if cfg and cfg.value:
+        try:
+            customs = _json.loads(cfg.value)
+            if isinstance(customs, list):
+                for item in customs:
+                    name = item.get("name", "")
+                    subs = item.get("subtypes", [])
+                    if name:
+                        existing = result.get(name, [])
+                        for s in subs:
+                            if s not in existing:
+                                existing.append(s)
+                        result[name] = existing
+        except (ValueError, TypeError):
+            pass
+
+    # 2. 从 BankTransaction 已有标注中补充
+    used_types = (await db.execute(
+        select(BankTransaction.expense_type, BankTransaction.expense_subtype).where(
+            BankTransaction.expense_type != None,
+            BankTransaction.is_deleted == False,
+            BankTransaction.company_id == current_user.company_id,
+        ).distinct()
+    )).all()
+    for t, s in used_types:
+        if t and t not in result:
+            result[t] = []
+        if t and s and s not in result.get(t, []):
+            result[t].append(s)
+
+    return result
+
+
+@router.post("/expense-types")
+async def add_expense_type(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """新增自定义费用类型"""
+    import json as _json
+    name = body.get("name", "").strip()
+    subtypes = body.get("subtypes", [])
+    if not name:
+        raise HTTPException(400, "name必填")
+
+    cfg = (await db.execute(
+        select(SystemConfigKV).where(SystemConfigKV.key == "custom_expense_types")
+    )).scalar_one_or_none()
+
+    customs = []
+    if cfg and cfg.value:
+        try:
+            customs = _json.loads(cfg.value)
+        except (ValueError, TypeError):
+            customs = []
+
+    # 追加或更新
+    existing = next((c for c in customs if c.get("name") == name), None)
+    if existing:
+        for s in subtypes:
+            if s and s not in existing.get("subtypes", []):
+                existing.setdefault("subtypes", []).append(s)
+    else:
+        customs.append({"name": name, "subtypes": [s for s in subtypes if s]})
+
+    if cfg:
+        cfg.value = _json.dumps(customs, ensure_ascii=False)
+    else:
+        cfg = SystemConfigKV(
+            key="custom_expense_types",
+            value=_json.dumps(customs, ensure_ascii=False),
+            category="finance",
+        )
+        db.add(cfg)
+    await db.flush()
+    invalidate_cache("bank")
+    return {"success": True, "name": name, "subtypes": subtypes}
 
 
 @router.get("/{tx_id}/suggest-annotation")
@@ -1411,10 +1499,23 @@ async def cross_entity_fund_flow(
     )).scalars().all()
     entity_map = {str(e.id): e.entity_name for e in entities}
 
+    # Fallback: if company_entities is empty, use companies table
+    if not entity_map:
+        from app.models.organization.models import Company
+        all_companies = (await db.execute(
+            select(Company).where(Company.is_deleted == False)
+        )).scalars().all()
+        entity_map = {str(c.id): c.name for c in all_companies}
+
     # Add virtual entities for personal accounts
-    virtual_entities = {"jiangpeng": "姜鹏", "niezhiping": "聂志平"}
-    for vid, vname in virtual_entities.items():
-        entity_map[vid] = vname
+    virtual_entities = [
+        ("jiangpeng", "姜鹏", "姜鹏"),
+        ("niezhiping", "聂志平", "N"),
+    ]
+    display_name_map = {}
+    for vid, backend_name, display_name in virtual_entities:
+        entity_map[vid] = backend_name
+        display_name_map[vid] = display_name
 
     # Get all transactions involving cross-entity counterparties
     query = select(BankTransaction).where(
@@ -1479,9 +1580,9 @@ async def cross_entity_fund_flow(
             "summary": tx.summary,
             "account_name": tx.account_name,
             "entity_id": tx_entity_id,
-            "entity_name": entity_map.get(tx_entity_id, ""),
+            "entity_name": display_name_map.get(tx_entity_id, entity_map.get(tx_entity_id, "")),
             "counterparty_entity_id": matched_entity,
-            "counterparty_entity_name": entity_map.get(matched_entity, ""),
+            "counterparty_entity_name": display_name_map.get(matched_entity, entity_map.get(matched_entity, "")),
             "expense_type": tx.expense_type,
             "direction": "outflow" if amount < 0 else "inflow",
             "is_proxy_payment": tx.is_proxy_payment,
@@ -1502,8 +1603,8 @@ async def cross_entity_fund_flow(
     for (eid_a, eid_b), flows in cross_entity_pairs.items():
         net = flows["from_a_to_b"] - flows["from_b_to_a"]
         pair_summaries.append({
-            "entity_a": {"id": eid_a, "name": entity_map.get(eid_a, "")},
-            "entity_b": {"id": eid_b, "name": entity_map.get(eid_b, "")},
+            "entity_a": {"id": eid_a, "name": display_name_map.get(eid_a, entity_map.get(eid_a, ""))},
+            "entity_b": {"id": eid_b, "name": display_name_map.get(eid_b, entity_map.get(eid_b, ""))},
             "a_to_b": flows["from_a_to_b"],
             "b_to_a": flows["from_b_to_a"],
             "net_a_to_b": round(net, 2),
@@ -1516,7 +1617,7 @@ async def cross_entity_fund_flow(
         entity_totals[eid]["net"] = round(entity_totals[eid]["inflow"] - entity_totals[eid]["outflow"], 2)
 
     return {
-        "entities": [{"id": eid, "name": ename} for eid, ename in entity_map.items()],
+        "entities": [{"id": eid, "name": display_name_map.get(eid, ename)} for eid, ename in entity_map.items()],
         "entity_totals": entity_totals,
         "pair_summaries": pair_summaries,
         "pair_flows": pair_flows[:200],
@@ -1887,24 +1988,4 @@ async def annotate_card(
         "project_id": project_id,
         "rule_id": rule_id,
     }
-
-
-@router.get("/expense-types")
-async def get_expense_types():
-    types = {
-        "车队收款": ["充电服务费", "充电电费", "月租"],
-        "电费收入": ["电费收入", "充电费"],
-        "电费支出": ["电费支出", "购电"],
-        "差旅费": ["差旅交通"],
-        "备用金": ["备用金支出"],
-        "工资薪酬": ["工资", "社保", "公积金"],
-        "材料采购": ["变压器供货", "电缆供货", "充电桩供货", "电气材料供货"],
-        "工程施工": ["土建施工", "高压安装", "低压安装", "附属设施建设"],
-        "设备销售": ["设备销售"],
-        "租赁费": ["租地"],
-        "运营费": ["运营", "合作方分成"],
-        "税费": ["税费"],
-        "其他": ["其他"],
-    }
-    return {"success": True, "data": types}
 

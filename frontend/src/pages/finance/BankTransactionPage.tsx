@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useCallback, useEffect, lazy, Suspense } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Upload, Wand, Trash2, Link, Loader2, FileUp, Tag, GitBranch, CheckSquare, Filter, ChevronUp, ChevronDown, X, CreditCard, BookOpen } from "lucide-react";
+import { Upload, Wand, Trash2, Link, Loader2, FileUp, Tag, GitBranch, CheckSquare, Filter, ChevronUp, ChevronDown, X, CreditCard, BookOpen, Plus } from "lucide-react";
 import { format } from "date-fns";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -99,6 +99,24 @@ export default function BankTransactionPage() {
     if (!annExpenseType || !expenseTypes[annExpenseType]) return [];
     return expenseTypes[annExpenseType];
   }, [annExpenseType, expenseTypes]);
+
+  // 新增费用类型
+  const [newTypeInput, setNewTypeInput] = useState("");
+  const [showNewType, setShowNewType] = useState(false);
+  const addTypeMut = useMutation({
+    mutationFn: (name: string) => (import("@/lib/http")).then(({ post }) => post("/finance/bank/expense-types", { name })),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["bank-expense-types"] }); setNewTypeInput(""); setShowNewType(false); toast.success("类型已添加"); },
+    onError: () => toast.error("添加失败"),
+  });
+
+  // 新增费用子项
+  const [newSubInput, setNewSubInput] = useState("");
+  const [showNewSub, setShowNewSub] = useState(false);
+  const addSubMut = useMutation({
+    mutationFn: ({ type, subtype }: { type: string; subtype: string }) => (import("@/lib/http")).then(({ post }) => post("/finance/bank/expense-types", { name: type, subtypes: [subtype] })),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["bank-expense-types"] }); setNewSubInput(""); setShowNewSub(false); toast.success("子项已添加"); },
+    onError: () => toast.error("添加失败"),
+  });
 
   const { data: projectData } = useQuery({ queryKey: ["projects-list-short"], queryFn: () => projectApi.listProjects({ page: 1, page_size: 200 }) });
   const projects = projectData?.items ?? [];
@@ -519,17 +537,59 @@ export default function BankTransactionPage() {
             )}
             <div>
               <Label>费用类型</Label>
-              <Select value={annExpenseType} onValueChange={(v) => { if (v) setAnnExpenseType(v); setAnnExpenseSubtype(""); }}>
-                <SelectTrigger><SelectValue placeholder="选择费用大类" /></SelectTrigger>
-                <SelectContent>{Object.keys(expenseTypes).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            {annExpenseType && expenseSubtypes.length > 0 && (
-              <div><Label>费用子类</Label>
-                <Select value={annExpenseSubtype} onValueChange={(v) => { if (v) setAnnExpenseSubtype(v) }}>
-                  <SelectTrigger><SelectValue placeholder="选择子类" /></SelectTrigger>
-                  <SelectContent>{expenseSubtypes.map((s: string) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+              <div className="flex gap-1">
+                <Select value={annExpenseType} onValueChange={(v) => { if (v) setAnnExpenseType(v); setAnnExpenseSubtype(""); }}>
+                  <SelectTrigger className="flex-1"><SelectValue placeholder="选择费用大类" /></SelectTrigger>
+                  <SelectContent>
+                    {Object.keys(expenseTypes).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}
+                    <SelectItem value="__new__" className="text-primary font-medium">+ 新增类型...</SelectItem>
+                  </SelectContent>
                 </Select>
+                {annExpenseType === "__new__" && (
+                  <div className="flex gap-1 flex-1">
+                    <Input placeholder="输入新类型名" value={newTypeInput} onChange={(e) => setNewTypeInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && newTypeInput.trim()) addTypeMut.mutate(newTypeInput.trim()) }}
+                      className="flex-1" autoFocus />
+                    <Button size="sm" disabled={!newTypeInput.trim() || addTypeMut.isPending}
+                      onClick={() => { if (newTypeInput.trim()) { addTypeMut.mutate(newTypeInput.trim()); setAnnExpenseType(newTypeInput.trim()); } }}>
+                      {addTypeMut.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "添加"}
+                    </Button>
+                  </div>
+                )}
+                {annExpenseType !== "__new__" && (
+                  <Button size="sm" variant="outline" onClick={() => { setShowNewType(true); setAnnExpenseType("__new__"); }} title="新增类型">
+                    <Plus className="size-3.5" />
+                  </Button>
+                )}
+              </div>
+            </div>
+            {annExpenseType && annExpenseType !== "__new__" && (
+              <div><Label>费用子类</Label>
+                <div className="flex gap-1">
+                  <Select value={annExpenseSubtype} onValueChange={(v: string | null) => { if (v === "__new__") { setShowNewSub(true); } else if (v) setAnnExpenseSubtype(v); }}>
+                    <SelectTrigger className="flex-1"><SelectValue placeholder="选择子类" /></SelectTrigger>
+                    <SelectContent>
+                      {expenseSubtypes.map((s: string) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                      <SelectItem value="__new__" className="text-primary font-medium">+ 新增子项...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {showNewSub && (
+                    <div className="flex gap-1 flex-1">
+                      <Input placeholder="输入新子项名" value={newSubInput} onChange={(e) => setNewSubInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && newSubInput.trim()) { addSubMut.mutate({ type: annExpenseType, subtype: newSubInput.trim() }); setAnnExpenseSubtype(newSubInput.trim()); } }}
+                        className="flex-1" autoFocus />
+                      <Button size="sm" disabled={!newSubInput.trim() || addSubMut.isPending}
+                        onClick={() => { if (newSubInput.trim()) { addSubMut.mutate({ type: annExpenseType, subtype: newSubInput.trim() }); setAnnExpenseSubtype(newSubInput.trim()); } }}>
+                        {addSubMut.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "添加"}
+                      </Button>
+                    </div>
+                  )}
+                  {!showNewSub && (
+                    <Button size="sm" variant="outline" onClick={() => setShowNewSub(true)} title="新增子项">
+                      <Plus className="size-3.5" />
+                    </Button>
+                  )}
+                </div>
               </div>
             )}
             {annExpenseType === "电费" && stations.length > 0 && (
@@ -631,10 +691,27 @@ export default function BankTransactionPage() {
           <DialogHeader><DialogTitle>批量标注 ({selectedIds.size} 条)</DialogTitle></DialogHeader>
           <div className="grid gap-3">
             <div><Label>费用类型</Label>
-              <Select value={annExpenseType} onValueChange={(v) => { if (v) setAnnExpenseType(v); setAnnExpenseSubtype(""); }}>
-                <SelectTrigger><SelectValue placeholder="选择费用大类" /></SelectTrigger>
-                <SelectContent>{Object.keys(expenseTypes).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}</SelectContent>
-              </Select>
+              <div className="flex gap-1">
+                <Select value={annExpenseType} onValueChange={(v) => { if (v === "__new__") { setShowNewType(true); } else { if (v) setAnnExpenseType(v); setAnnExpenseSubtype(""); } }}>
+                  <SelectTrigger className="flex-1"><SelectValue placeholder="选择费用大类" /></SelectTrigger>
+                  <SelectContent>
+                    {Object.keys(expenseTypes).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}
+                    <SelectItem value="__new__" className="text-primary font-medium">+ 新增类型...</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="outline" onClick={() => setShowNewType(true)} title="新增类型"><Plus className="size-3.5" /></Button>
+              </div>
+              {showNewType && (
+                <div className="flex gap-1 mt-1">
+                  <Input placeholder="输入新类型名" value={newTypeInput} onChange={(e) => setNewTypeInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && newTypeInput.trim()) { addTypeMut.mutate(newTypeInput.trim()); setAnnExpenseType(newTypeInput.trim()); } }}
+                    className="flex-1" autoFocus />
+                  <Button size="sm" disabled={!newTypeInput.trim() || addTypeMut.isPending}
+                    onClick={() => { if (newTypeInput.trim()) { addTypeMut.mutate(newTypeInput.trim()); setAnnExpenseType(newTypeInput.trim()); } }}>
+                    {addTypeMut.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "添加"}
+                  </Button>
+                </div>
+              )}
             </div>
             <div><Label>关联项目</Label>
               <Select value={annProjectId} onValueChange={(v) => { if (v !== null) setAnnProjectId(v) }}>

@@ -74,7 +74,7 @@ export default function EmployeePlanPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={() => { let tasks: any = {}; if (form.tasks) { try { tasks = JSON.parse(form.tasks); } catch { tasks = { text: form.tasks }; } } createMut.mutate({ ...form, tasks }); }} disabled={createMut.isPending}>提交</Button>
+            <Button onClick={() => { let tasks: any = {}; if (form.tasks) { try { tasks = JSON.parse(form.tasks); } catch { tasks = { text: form.tasks }; } } createMut.mutate({ ...form, tasks, plan_date: form.plan_date || undefined }); }} disabled={createMut.isPending}>提交</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -43,7 +43,7 @@ export default function DailyFeedbackPage() {
 
   const openCreate = () => { setForm(defaultForm); setEditId(null); setDialogOpen(true); };
   const openEdit = (item: any) => { setForm({ project_id: item.project_id ?? "", daily_plan_id: item.daily_plan_id ?? "", feedback_date: item.feedback_date ?? "", completed_tasks: item.completed_tasks ?? "", issues: item.issues ?? "", actual_hours: String(item.actual_hours ?? ""), worker_count: String(item.worker_count ?? ""), recorder_id: item.recorder_id ?? "", status: item.status ?? "draft" }); setEditId(item.id); setDialogOpen(true); };
-  const submit = () => { const payload = { ...form, actual_hours: Number(form.actual_hours) || 0, worker_count: Number(form.worker_count) || 0 }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
+  const submit = () => { const payload = { ...form, actual_hours: Number(form.actual_hours) || 0, worker_count: Number(form.worker_count) || 0, feedback_date: form.feedback_date || undefined, daily_plan_id: form.daily_plan_id || undefined, recorder_id: form.recorder_id || undefined }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

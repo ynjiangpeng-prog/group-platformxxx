@@ -44,7 +44,7 @@ class PettyCashExpense(TenantBase):
 
     pool_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True), index=True)
     fund_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True), index=True)
-    project_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     expense_date: Mapped[str] = mapped_column(Date, nullable=False)
     category: Mapped[str] = mapped_column(String(50))
     amount: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)

@@ -176,7 +176,7 @@ export default function InvoicePage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>取消</Button>
-            <Button onClick={() => createMut.mutate({ ...form, amount_before_tax: Number(form.amount_before_tax) || 0, tax_rate: Number(form.tax_rate) || 0, tax_amount: Number(form.tax_amount) || 0, total_amount: Number(form.total_amount) || 0 })} disabled={createMut.isPending}>提交</Button>
+            <Button onClick={() => createMut.mutate({ ...form, amount_before_tax: Number(form.amount_before_tax) || 0, tax_rate: Number(form.tax_rate) || 0, tax_amount: Number(form.tax_amount) || 0, total_amount: Number(form.total_amount) || 0, issue_date: form.issue_date || undefined, contract_id: form.contract_id || undefined, purchase_order_id: form.purchase_order_id || undefined, voucher_id: form.voucher_id || undefined, arap_id: form.arap_id || undefined })} disabled={createMut.isPending}>提交</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

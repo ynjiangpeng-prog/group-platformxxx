@@ -54,6 +54,7 @@ import {
   CircuitBoard,
   Wrench,
   CircleDollarSign,
+  Binary,
 } from "lucide-react"
 import {
   SidebarProvider,
@@ -85,6 +86,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAuthStore } from "@/store/auth"
 import { listProjects } from "@/api/project"
 import { listNotifications, markNotificationRead, markAllRead } from "@/api/system"
+import AiQuickEntry from "@/components/ai/AiQuickEntry"
 
 import type { LucideIcon } from "lucide-react"
 import type { Project, Notification } from "@/api/types"
@@ -108,6 +110,8 @@ const menuGroups: MenuGroup[] = [
     label: "项目主线",
     icon: Radar,
     items: [
+      { title: "经营驾驶舱", icon: Gauge, path: "/autopilot" },
+      { title: "智能进化", icon: Brain, path: "/agent-evolution" },
       { title: "全部项目", icon: LayoutDashboard, path: "/" },
       { title: "新建项目", icon: PlusCircle, path: "/project/create" },
     ],
@@ -134,7 +138,6 @@ const menuGroups: MenuGroup[] = [
     icon: Users,
     items: [
       { title: "场地线索", icon: Search, path: "/charging/leads" },
-      { title: "客户拓展", icon: Target, path: "/charging/customer-expansion" },
       { title: "供应商列表", icon: Package, path: "/erp/counterparty-flow" },
     ],
   },
@@ -148,7 +151,8 @@ const menuGroups: MenuGroup[] = [
       { title: "银行流水", icon: Landmark, path: "/bank-transactions" },
       { title: "跨主体关联", icon: ArrowLeftRight, path: "/cross-entity-flow" },
       { title: "财务报表", icon: FileSpreadsheet, path: "/finance/reports" },
-      { title: "备用金", icon: Wallet, path: "/petty-cash-admin" },
+      { title: "我的备用金", icon: Wallet, path: "/my-petty-cash" },
+      { title: "备用金管理", icon: CircleDollarSign, path: "/petty-cash-admin" },
     ],
   },
   {
@@ -160,10 +164,14 @@ const menuGroups: MenuGroup[] = [
     ],
   },
   {
-    label: "智能分析",
-    icon: Sparkles,
+    label: "数字孪生",
+    icon: Binary,
     items: [
-      { title: "经营驾驶舱", icon: Gauge, path: "/autopilot" },
+      { title: "业务时间轴", icon: Calendar, path: "/business-twin" },
+      { title: "知识图谱", icon: Binary, path: "/business-twin/graph" },
+      { title: "预测中心", icon: TrendingUp, path: "/business-twin/predictions" },
+      { title: "模拟沙盘", icon: Activity, path: "/business-twin/simulate" },
+      { title: "AI助手", icon: Brain, path: "/business-twin/assistant" },
     ],
   },
   {
@@ -401,6 +409,7 @@ export default function AppLayout() {
           <Outlet />
         </div>
       </SidebarInset>
+      {user && <AiQuickEntry />}
     </SidebarProvider>
   )
 }

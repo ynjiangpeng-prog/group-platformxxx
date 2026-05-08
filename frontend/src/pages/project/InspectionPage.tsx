@@ -30,7 +30,8 @@ export default function InspectionPage() {
   function openCreate() { setEditId(null); setForm({ inspection_type: "", inspection_date: "", overall_result: "", issues_found: "", rectification_status: "pending" }); setDialogOpen(true); }
   function openEdit(item: Inspection) { setEditId(item.id); setForm({ inspection_type: item.inspection_type ?? "", inspection_date: item.inspection_date ?? "", overall_result: item.overall_result ?? "", issues_found: item.issues_found ?? "", rectification_status: item.rectification_status ?? "pending" }); setDialogOpen(true); }
   function submit() {
-    editId ? updateMut.mutate({ id: editId, ...form }) : createMut.mutate(form);
+    const payload = { ...form, inspection_date: form.inspection_date || undefined };
+    editId ? updateMut.mutate({ id: editId, ...payload }) : createMut.mutate(payload);
   }
 
   return (

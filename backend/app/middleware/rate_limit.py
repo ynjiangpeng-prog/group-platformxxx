@@ -24,7 +24,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     
     # 限流规则: (prefix, max_requests, window_seconds)
     RULES = [
-        ("/api/v1/auth/", 10, 60),      # 认证: 10次/分钟
+        ("/api/v1/auth/", 30, 60),      # 认证: 30次/分钟
         ("/api/v1/files/", 20, 60),     # 文件: 20次/分钟
         ("/api/v1/", 100, 60),          # 普通API: 100次/分钟
     ]

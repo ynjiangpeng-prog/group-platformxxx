@@ -12,9 +12,9 @@ from app.api.deps.auth import generate_no, get_current_user, get_db
 from app.models.charging import (
     ChargingDevice, ChargingMember, ChargingOrder, ChargingStation,
     ElectricityPayment, FleetCustomer, FleetInvoiceRequest, FleetPaymentBill,
-    FleetRechargeRecord, MonthlyTaskList, Partnership, PartnershipGacDetail,
-    PartnershipNioDetail, RevenueSharePlan, SiteProspect, SiteVisitRecord,
-    StationFinancialMonthly, TargetCustomer,
+    FleetRechargeRecord, MonthlyTaskList, OperationMemo, OperationStrategy,
+    Partnership, PartnershipGacDetail, PartnershipNioDetail, RevenueSharePlan,
+    SiteProspect, SiteVisitRecord, StationFinancialMonthly, TargetCustomer,
 )
 from app.models.organization import User
 from app.services.charging_order_import import ChargingOrderImportService
@@ -2253,3 +2253,150 @@ async def import_charging_orders_file(
         })
 
     return {"imported": len(new_orders), "skipped": skipped, "matched": matched, "preview": preview}
+
+
+# ── 运营备忘录 ──────────────────────────────────────────────────
+
+class MemoCreate(BaseModel):
+    title: str = Field(..., max_length=200)
+    station_id: str | None = None
+    memo_type: str = "maintenance"
+    content: str | None = None
+    priority: str = "normal"
+    status: str = "open"
+    remark: str | None = None
+
+
+class MemoUpdate(BaseModel):
+    title: str | None = None
+    station_id: str | None = None
+    memo_type: str | None = None
+    content: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    remark: str | None = None
+
+
+@router.get("/operation-memos")
+async def list_operation_memos(
+    memo_type: str | None = None,
+    status: str | None = None,
+    station_id: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(OperationMemo).where(OperationMemo.is_deleted == False, OperationMemo.company_id == current_user.company_id)
+    if memo_type:
+        query = query.where(OperationMemo.memo_type == memo_type)
+    if status:
+        query = query.where(OperationMemo.status == status)
+    if station_id:
+        query = query.where(OperationMemo.station_id == station_id)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
+    query = query.order_by(OperationMemo.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    return {"items": result.scalars().all(), "total": total, "page": page, "page_size": page_size}
+
+
+@router.post("/operation-memos")
+async def create_operation_memo(body: MemoCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    obj = OperationMemo(**body.model_dump(), company_id=current_user.company_id, created_by=current_user.id)
+    db.add(obj)
+    await db.flush()
+    await db.refresh(obj)
+    return obj
+
+
+@router.put("/operation-memos/{memo_id}")
+async def update_operation_memo(memo_id: str, body: MemoUpdate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OperationMemo).where(OperationMemo.id == memo_id, OperationMemo.is_deleted == False))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(status_code=404, detail="不存在")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(obj, k, v)
+    obj.updated_by = current_user.id
+    await db.flush()
+    await db.refresh(obj)
+    return obj
+
+
+@router.delete("/operation-memos/{memo_id}")
+async def delete_operation_memo(memo_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await db.execute(update(OperationMemo).where(OperationMemo.id == memo_id).values(is_deleted=True))
+    return {"message": "删除成功"}
+
+
+# ── 运营策略 ──────────────────────────────────────────────────
+
+class StrategyCreate(BaseModel):
+    title: str = Field(..., max_length=200)
+    station_id: str | None = None
+    strategy_type: str = "pricing"
+    content: str | None = None
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    status: str = "active"
+    remark: str | None = None
+
+
+class StrategyUpdate(BaseModel):
+    title: str | None = None
+    station_id: str | None = None
+    strategy_type: str | None = None
+    content: str | None = None
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    status: str | None = None
+    remark: str | None = None
+
+
+@router.get("/operation-strategies")
+async def list_operation_strategies(
+    strategy_type: str | None = None,
+    status: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(OperationStrategy).where(OperationStrategy.is_deleted == False, OperationStrategy.company_id == current_user.company_id)
+    if strategy_type:
+        query = query.where(OperationStrategy.strategy_type == strategy_type)
+    if status:
+        query = query.where(OperationStrategy.status == status)
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
+    query = query.order_by(OperationStrategy.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    return {"items": result.scalars().all(), "total": total, "page": page, "page_size": page_size}
+
+
+@router.post("/operation-strategies")
+async def create_operation_strategy(body: StrategyCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    obj = OperationStrategy(**body.model_dump(), company_id=current_user.company_id, created_by=current_user.id)
+    db.add(obj)
+    await db.flush()
+    await db.refresh(obj)
+    return obj
+
+
+@router.put("/operation-strategies/{strategy_id}")
+async def update_operation_strategy(strategy_id: str, body: StrategyUpdate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(OperationStrategy).where(OperationStrategy.id == strategy_id, OperationStrategy.is_deleted == False))
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(status_code=404, detail="不存在")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(obj, k, v)
+    obj.updated_by = current_user.id
+    await db.flush()
+    await db.refresh(obj)
+    return obj
+
+
+@router.delete("/operation-strategies/{strategy_id}")
+async def delete_operation_strategy(strategy_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await db.execute(update(OperationStrategy).where(OperationStrategy.id == strategy_id).values(is_deleted=True))
+    return {"message": "删除成功"}

@@ -50,7 +50,6 @@ const FixedAssetPage = lazy(() => import("@/pages/assets/FixedAssetPage"))
 
 const PlanPage = lazy(() => import("@/pages/business/PlanPage"))
 const OperationStrategyPage = lazy(() => import("@/pages/charging/OperationStrategyPage"))
-const CustomerExpansionPage = lazy(() => import("@/pages/charging/CustomerExpansionPage"))
 const OperationMemoPage = lazy(() => import("@/pages/charging/OperationMemoPage"))
 
 const PettyCashAdminPage = lazy(() => import("@/pages/petty-cash/PettyCashAdminPage"))
@@ -75,6 +74,22 @@ const AuditProjectPage = lazy(() => import("@/pages/audit/AuditProjectPage"))
 const ErpReceiptPage = lazy(() => import("@/pages/erp/ReceiptPage"))
 const ErpSupplierPage = lazy(() => import("@/pages/erp/SupplierPage"))
 const CounterpartyFromFlowPage = lazy(() => import("@/pages/erp/CounterpartyFromFlowPage"))
+
+const EvolutionDashboard = lazy(() => import("@/pages/agent-evolution/EvolutionDashboard"))
+const AgentDetailPage = lazy(() => import("@/pages/agent-evolution/AgentDetailPage"))
+const WorkflowListPage = lazy(() => import("@/pages/agent-evolution/WorkflowListPage"))
+const EvolutionApprovals = lazy(() => import("@/pages/agent-evolution/EvolutionApprovals"))
+const WorkflowEditor = lazy(() => import("@/pages/agent-evolution/WorkflowEditor"))
+
+const BusinessTimeline = lazy(() => import("@/pages/business-twin/BusinessTimeline"))
+
+const KnowledgeGraphPage = lazy(() => import("@/pages/business-twin/KnowledgeGraph"))
+
+const PredictionDashboard = lazy(() => import("@/pages/business-twin/PredictionDashboard"))
+
+const SimulationSandbox = lazy(() => import("@/pages/business-twin/SimulationSandbox"))
+
+const AIAssistant = lazy(() => import("@/pages/business-twin/AIAssistant"))
 
 function Loading() {
   return (
@@ -145,7 +160,6 @@ export const router = createBrowserRouter([
           { path: "charging/devices", element: Lazy(DeviceListPage) },
           { path: "charging/operations", element: Lazy(OperationsPage) },
           { path: "charging/strategy", element: Lazy(OperationStrategyPage) },
-          { path: "charging/customer-expansion", element: Lazy(CustomerExpansionPage) },
           { path: "charging/operation-memo", element: Lazy(OperationMemoPage) },
           { path: "charging/leads", element: Lazy(LeadPage) },
           { path: "charging/orders", element: Lazy(OrderListPage) },
@@ -166,6 +180,17 @@ export const router = createBrowserRouter([
           { path: "crm-reminders", element: Lazy(CrmReminderPage) },
           { path: "autopilot", element: Lazy(AutopilotPage) },
           { path: "executive", element: Lazy(ExecutivePage) },
+          { path: "agent-evolution", element: Lazy(EvolutionDashboard) },
+          { path: "agent-evolution/agent/:id", element: Lazy(AgentDetailPage) },
+          { path: "agent-evolution/workflows", element: Lazy(WorkflowListPage) },
+          { path: "agent-evolution/approvals", element: Lazy(EvolutionApprovals) },
+          { path: "agent-evolution/workflow-editor/:id", element: Lazy(WorkflowEditor) },
+
+          { path: "business-twin", element: Lazy(BusinessTimeline) },
+          { path: "business-twin/graph", element: Lazy(KnowledgeGraphPage) },
+          { path: "business-twin/predictions", element: Lazy(PredictionDashboard) },
+          { path: "business-twin/simulate", element: Lazy(SimulationSandbox) },
+          { path: "business-twin/assistant", element: Lazy(AIAssistant) },
           
           { path: "entities", element: Lazy(EntityManagePage) },
           { path: "investment-roi", element: Lazy(InvestmentROIPage) },

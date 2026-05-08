@@ -119,7 +119,10 @@ export default function ProjectListPage() {
   }
 
   const handleSubmit = () => {
-    saveMutation.mutate({ id: editItem?.id, data: form })
+    const data = { ...form }
+    if (data.start_date === "") data.start_date = undefined
+    if (data.end_date === "") data.end_date = undefined
+    saveMutation.mutate({ id: editItem?.id, data })
   }
 
   const handleQuickCreate = () => {

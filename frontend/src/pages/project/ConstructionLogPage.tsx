@@ -80,7 +80,9 @@ export default function ConstructionLogPage() {
   }
 
   const handleSubmit = () => {
-    saveMutation.mutate({ id: editItem?.id, data: form })
+    const data = { ...form }
+    if (data.log_date === "") data.log_date = undefined
+    saveMutation.mutate({ id: editItem?.id, data })
   }
 
   const totalPages = data ? Math.ceil(data.total / 10) : 1

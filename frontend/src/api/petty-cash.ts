@@ -18,6 +18,8 @@ export interface PettyCashExpense {
   remark?: string; created_at?: string
   fund_no?: string; employee_name?: string; project_name?: string
   invoices?: PettyCashInvoice[]
+  attachments?: Record<string, unknown>[]
+  invoice_files?: Record<string, unknown>[]
 }
 
 export interface PettyCashInvoice {
@@ -97,3 +99,18 @@ export const createDisbursement = (data: Partial<FundDisbursement>) =>
   post<FundDisbursement>('/erp/entities/fund-disbursements', data)
 export const listDisbursements = (params?: Record<string, unknown>) =>
   get<PaginatedResult<FundDisbursement>>('/erp/entities/fund-disbursements', params)
+
+export const adjustPool = (id: string, data: { amount: number; reason: string }) =>
+  post<PettyCashFund>(`/petty-cash/pools/${id}/adjust`, data)
+export const syncFromBank = () =>
+  post<{ synced_count: number }>('/petty-cash/pools/sync-from-bank')
+export const cancelExpense = (id: string) =>
+  post<PettyCashExpense>(`/petty-cash/expenses/${id}/cancel`)
+export const uploadExpenseAttachment = (id: string, file: File, type: string = 'payment_proof') => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return post<{ success: boolean; file: Record<string, unknown> }>(
+    `/petty-cash/expenses/${id}/upload-attachment?attachment_type=${type}`, fd,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  )
+}

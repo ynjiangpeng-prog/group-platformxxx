@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from "react"
 import { Input } from "@/components/ui/input"
 import { Loader2 } from "lucide-react"
+import AMapLoader from "@amap/amap-jsapi-loader"
 
 interface GaodeMapProps {
   value?: { lng: number; lat: number; address?: string }
@@ -10,11 +11,7 @@ interface GaodeMapProps {
 const DEFAULT_LNG = 102.7123
 const DEFAULT_LAT = 25.0406
 
-declare global {
-  interface Window {
-    AMap: any
-  }
-}
+const AMAP_KEY = import.meta.env.VITE_AMAP_KEY || "b23a71f6a0c9e6f67c3f9a8e2d1b5c4a"
 
 export default function GaodeMap({ value, onChange }: GaodeMapProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -27,15 +24,17 @@ export default function GaodeMap({ value, onChange }: GaodeMapProps) {
   const lng = value?.lng ?? DEFAULT_LNG
   const lat = value?.lat ?? DEFAULT_LAT
 
-  const initMap = useCallback(() => {
-    if (!containerRef.current || !window.AMap) {
-      setError("地图加载失败，请刷新页面重试")
-      setLoading(false)
-      return
-    }
+  const initMap = useCallback(async () => {
+    if (!containerRef.current) return
 
     try {
-      const AMap = window.AMap
+      const AMap = await AMapLoader.load({
+        key: AMAP_KEY,
+        version: "2.0",
+        plugins: ["AMap.Geocoder", "AMap.AutoComplete"],
+      })
+
+      if (!containerRef.current) return
 
       const map = new AMap.Map(containerRef.current, {
         center: [lng, lat],
@@ -66,7 +65,7 @@ export default function GaodeMap({ value, onChange }: GaodeMapProps) {
         const pos = { lng: e.lnglat.lng, lat: e.lnglat.lat }
         marker.setPosition([pos.lng, pos.lat])
         map.setCenter([pos.lng, pos.lat])
-        
+
         if (geocoderRef.current) {
           geocoderRef.current.getAddress([pos.lng, pos.lat], (status: string, result: any) => {
             const address = status === "complete" ? result?.regeocode?.formattedAddress : undefined
@@ -77,71 +76,48 @@ export default function GaodeMap({ value, onChange }: GaodeMapProps) {
         }
       })
 
-      AMap.plugin(["AMap.Geocoder", "AMap.AutoComplete"], () => {
-        const geocoder = new AMap.Geocoder()
-        geocoderRef.current = geocoder
+      const geocoder = new AMap.Geocoder()
+      geocoderRef.current = geocoder
 
-        if (searchRef.current) {
-          const autocomplete = new AMap.AutoComplete({
-            input: searchRef.current,
-            city: "全国",
-          })
-          autocomplete.on("select", (e: any) => {
-            const pos = { lng: e.poi.location.lng, lat: e.poi.location.lat }
-            marker.setPosition([pos.lng, pos.lat])
-            map.setCenter([pos.lng, pos.lat])
-            onChange({ ...pos, address: e.poi.name })
-          })
-        }
+      if (searchRef.current) {
+        const autocomplete = new AMap.AutoComplete({
+          input: searchRef.current,
+          city: "全国",
+        })
+        autocomplete.on("select", (e: any) => {
+          const pos = { lng: e.poi.location.lng, lat: e.poi.location.lat }
+          marker.setPosition([pos.lng, pos.lat])
+          map.setCenter([pos.lng, pos.lat])
+          onChange({ ...pos, address: e.poi.name })
+        })
+      }
 
-        setLoading(false)
-      })
-    } catch (err) {
+      setLoading(false)
+    } catch (err: any) {
       console.error("Map init error:", err)
-      setError("地图初始化失败")
+      setError("地图加载失败，请检查网络或联系管理员配置地图密钥")
       setLoading(false)
     }
   }, [lng, lat, onChange])
 
   useEffect(() => {
-    if (typeof window === "undefined") return
-
-    if (window.AMap) {
-      initMap()
-    } else {
-      const checkInterval = setInterval(() => {
-        if (window.AMap) {
-          clearInterval(checkInterval)
-          initMap()
-        }
-      }, 500)
-
-      const timeout = setTimeout(() => {
-        clearInterval(checkInterval)
-        setError("地图加载超时，请检查网络连接")
-        setLoading(false)
-      }, 10000)
-
-      return () => {
-        clearInterval(checkInterval)
-        clearTimeout(timeout)
-      }
-    }
+    initMap()
 
     return () => {
       if (mapRef.current) {
         mapRef.current.destroy()
         mapRef.current = null
         markerRef.current = null
+        geocoderRef.current = null
       }
     }
   }, [initMap])
 
   return (
     <div className="space-y-2">
-      <div 
-        ref={containerRef} 
-        style={{ height: 400, width: "100%" }} 
+      <div
+        ref={containerRef}
+        style={{ height: 400, width: "100%" }}
         className="rounded-md border relative"
       >
         {loading && (

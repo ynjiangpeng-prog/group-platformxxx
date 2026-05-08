@@ -63,7 +63,12 @@ class Scheduler:
 
                     from app.services.finance_event_chain import finance_event_chain
                     await finance_event_chain.on_bank_import(db, cid)
-                    
+
+                    # 业务数字孪生：每日指标聚合
+                    from app.services.business_digital_twin.metric_aggregator import metric_aggregator
+                    yesterday = (now.date() - timedelta(days=1))
+                    await metric_aggregator.aggregate_daily(db, cid, yesterday)
+
                     # 甩手掌柜：自动触发扫描
                     from app.services.auto_trigger import auto_trigger
                     triggered = await auto_trigger.scan_and_trigger(db, cid)
@@ -92,6 +97,31 @@ class Scheduler:
                     logger.info("Weekly learning for %s: %s", cid, result)
                 except Exception as e:
                     logger.exception("Weekly learning failed for %s: %s", cid, e)
+                    await db.rollback()
+
+                # 业务数字孪生：每月指标聚合（周一时跑上月）
+                try:
+                    from app.services.business_digital_twin.metric_aggregator import metric_aggregator
+                    last_month = now.date().replace(day=1) - timedelta(days=1)
+                    await metric_aggregator.aggregate_monthly(
+                        db, cid, last_month.year, last_month.month
+                    )
+                    await db.commit()
+                except Exception as e:
+                    logger.exception("Monthly metric aggregation failed for %s: %s", cid, e)
+                    await db.rollback()
+
+                # 智能进化：每周检查并执行进化循环
+                try:
+                    from app.services.agent_evo.evolution.learning_loop import learning_loop
+                    evo_result = await learning_loop.check_and_evolve(db, cid)
+                    # 自动回滚检查
+                    rollback_result = await learning_loop.auto_rollback_check(db, cid)
+                    await db.commit()
+                    logger.info("Weekly evolution for %s: evolved=%d, rolled_back=%d",
+                                cid, len(evo_result), len(rollback_result))
+                except Exception as e:
+                    logger.exception("Weekly evolution failed for %s: %s", cid, e)
                     await db.rollback()
 
     def stop(self):

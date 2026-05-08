@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from sqlalchemy import select, text
+import base64
 from datetime import datetime
 import json
 import httpx
 import os
+from pydantic import BaseModel
 
+from fastapi import File, UploadFile
 from app.api.deps.auth import get_current_user, get_db
 from app.models.organization import User
 
@@ -236,3 +239,195 @@ async def ai_anomaly_detection(
         "top_transactions": [{"date": str(row[0]), "counterparty": row[1], "amount": float(row[2]), "summary": row[3]} for row in top_transactions],
         "generated_at": datetime.now().isoformat()
     }
+
+
+# ─── Quick Entry (AI快速录入) ───
+
+FORM_TYPES = {
+    "petty_cash_expense": "备用金核销",
+    "invoice": "发票录入",
+    "receipt": "收据/小票",
+    "payment_doc": "付款依据",
+    "construction_log": "施工日志",
+}
+
+
+@router.post("/quick-entry")
+async def quick_entry_analyze(
+    text: str = "",
+    voice_transcript: str = "",
+    file: UploadFile | None = File(None),
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """AI快速录入 — 图片/文字/语音识别"""
+    from app.services.ai_gateway import ai_gateway
+    from app.services.context_builder import context_builder
+
+    extracted = {}
+    doc_type = "unknown"
+    confidence = 0.0
+    suggested_project_id = None
+    suggested_project_name = None
+
+    combined_text = f"{text} {voice_transcript}".strip()
+
+    if file:
+        content = await file.read()
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件过大")
+        image_b64 = base64.b64encode(content).decode("utf-8")
+
+        classify_prompt = (
+            "请判断这张图片属于哪种文档类型，只返回以下之一：\n"
+            "invoice(发票), receipt(收据/小票), payment_doc(付款依据/送货单/开支明细), "
+            "construction_log(施工日志), petty_cash_doc(备用金核销单据), other(其他)\n"
+            "返回JSON: {\"doc_type\": \"...\", \"confidence\": 0.9}"
+        )
+        try:
+            classify_result = await ai_gateway.provider.vision(image_b64, classify_prompt)
+            parsed = ai_gateway._parse_json(classify_result)
+            doc_type = parsed.get("doc_type", "other")
+            confidence = parsed.get("confidence", 0.5)
+        except Exception:
+            doc_type = "other"
+            confidence = 0.3
+
+        handlers = {
+            "invoice": ai_gateway.recognize_invoice,
+            "receipt": ai_gateway.recognize_receipt,
+            "payment_doc": ai_gateway.recognize_payment_doc,
+            "construction_log": ai_gateway.recognize_construction_log,
+            "petty_cash_doc": ai_gateway.recognize_petty_cash_doc,
+        }
+        handler = handlers.get(doc_type)
+        if handler:
+            try:
+                extracted = await handler(image_b64)
+            except Exception:
+                extracted = {"raw_text": "识别失败"}
+
+    if combined_text and not extracted:
+        system_prompt = await context_builder.build_system_prompt(
+            db, current_user.company_id, "autopilot",
+            "你是经营数据录入助手。用户会用口语描述一笔费用或业务，请提取结构化数据。"
+        )
+        user_prompt = (
+            f"用户说：\"{combined_text}\"\n\n"
+            "请提取并返回JSON：\n"
+            "{\n"
+            "  \"form_type\": \"petty_cash_expense|invoice|receipt|payment_doc|construction_log\",\n"
+            "  \"confidence\": 0.9,\n"
+            "  \"extracted_fields\": {\n"
+            "    \"category\": \"费用分类\",\n"
+            "    \"amount\": 金额数字,\n"
+            "    \"description\": \"描述\",\n"
+            "    \"counterparty\": \"对方名称\",\n"
+            "    \"date\": \"YYYY-MM-DD\",\n"
+            "    \"project_name\": \"项目名称\"\n"
+            "  }\n"
+            "}\n"
+            "【重要】直接输出JSON，不要markdown标记。"
+        )
+        try:
+            result = await ai_gateway.provider.chat([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ])
+            parsed = ai_gateway._parse_json(result)
+            doc_type = parsed.get("form_type", "petty_cash_expense")
+            confidence = parsed.get("confidence", 0.5)
+            extracted = parsed.get("extracted_fields", {})
+        except Exception:
+            doc_type = "petty_cash_expense"
+            extracted = {"description": combined_text}
+
+    if extracted.get("project_name"):
+        from sqlalchemy import select, func
+        from app.models.project.models import Project
+        proj_name = extracted["project_name"]
+        proj = (await db.execute(
+            select(Project).where(
+                Project.company_id == current_user.company_id,
+                Project.is_deleted == False,
+                Project.name.ilike(f"%{proj_name}%"),
+            ).limit(1)
+        )).scalar_one_or_none()
+        if proj:
+            suggested_project_id = str(proj.id)
+            suggested_project_name = proj.name
+
+    form_type = doc_type
+    if doc_type in ("invoice", "receipt", "payment_doc", "petty_cash_doc"):
+        form_type = "petty_cash_expense"
+
+    return {
+        "document_type": doc_type,
+        "form_type": form_type,
+        "form_type_label": FORM_TYPES.get(form_type, doc_type),
+        "confidence": confidence,
+        "extracted_fields": extracted,
+        "suggested_project_id": suggested_project_id,
+        "suggested_project_name": suggested_project_name,
+    }
+
+
+class QuickEntrySubmit(BaseModel):
+    form_type: str
+    form_data: dict
+    project_id: str | None = None
+
+
+@router.post("/quick-entry/submit")
+async def quick_entry_submit(
+    body: QuickEntrySubmit,
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """AI快速录入 — 确认提交"""
+    from app.models.petty_cash.models import PettyCashExpense, PettyCashPool
+
+    if body.form_type == "petty_cash_expense":
+        pool = await _get_or_create_pool_quick(db, current_user)
+        fd = body.form_data
+        expense = PettyCashExpense(
+            pool_id=str(pool.id),
+            project_id=body.project_id or fd.get("project_id", ""),
+            expense_date=fd.get("date") or fd.get("expense_date") or datetime.now().date().isoformat(),
+            category=fd.get("category", "other"),
+            amount=float(fd.get("amount", 0)),
+            description=fd.get("description", ""),
+            status="pending",
+            company_id=current_user.company_id,
+            created_by=current_user.id,
+        )
+        db.add(expense)
+        await db.flush()
+        await db.refresh(expense)
+        return {"success": True, "id": str(expense.id), "form_type": "petty_cash_expense"}
+
+    return {"success": False, "error": f"不支持的表单类型: {body.form_type}"}
+
+
+async def _get_or_create_pool_quick(db, user):
+    from app.models.petty_cash.models import PettyCashPool
+    result = await db.execute(
+        select(PettyCashPool).where(
+            PettyCashPool.company_id == user.company_id,
+            PettyCashPool.employee_id == user.id,
+            PettyCashPool.is_deleted == False,
+        )
+    )
+    pool = result.scalar_one_or_none()
+    if pool:
+        return pool
+    pool = PettyCashPool(
+        company_id=user.company_id,
+        employee_id=user.id,
+        total_received=0, total_used=0, balance=0,
+        status="active",
+    )
+    db.add(pool)
+    await db.flush()
+    await db.refresh(pool)
+    return pool

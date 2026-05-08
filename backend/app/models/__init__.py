@@ -8,3 +8,4 @@ from app.models.finance import *  # noqa: F401,F403
 from app.models.system import *  # noqa: F401,F403
 from app.models.petty_cash import *  # noqa: F401,F403
 from app.models.business import *  # noqa: F401,F403
+from app.models.agent_evolution import *  # noqa: F401,F403

@@ -33,3 +33,32 @@ export const smartClassify = (file: File) => {
   formData.append('file', file)
   return post<unknown>('/ai/ocr/smart-classify', formData)
 }
+
+export interface PossibleFormType {
+  value: string
+  label: string
+  recommended: boolean
+}
+
+export interface QuickEntryResult {
+  document_type: string
+  form_type: string
+  form_type_label: string
+  confidence: number
+  extracted_fields: Record<string, unknown>
+  suggested_project_id: string | null
+  suggested_project_name: string | null
+  possible_form_types: PossibleFormType[]
+}
+
+export const quickEntryAnalyze = (data: FormData) =>
+  post<QuickEntryResult>('/ai/quick-entry', data, { headers: { 'Content-Type': 'multipart/form-data' } })
+
+export const quickEntryAnalyzeText = (text: string) =>
+  post<QuickEntryResult>('/ai/quick-entry/text', { text })
+
+export const quickEntrySubmit = (data: {
+  form_type: string
+  form_data: Record<string, unknown>
+  project_id?: string
+}) => post<{ success: boolean; id?: string; error?: string }>('/ai/quick-entry/submit', data)

@@ -383,7 +383,7 @@ export default function RuleMode() {
   })
 
   const rules = ((rulesData as any)?.data ?? []) as AnnotationRule[]
-  const types = (expenseTypes as any)?.data ?? {}
+  const types = expenseTypes ?? {}
   const projects = projectsData?.items ?? []
 
   const applyAllMut = useMutation({

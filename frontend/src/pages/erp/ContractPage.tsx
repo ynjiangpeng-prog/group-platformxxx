@@ -27,7 +27,7 @@ export default function ContractPage() {
 
   function openCreate() { setEditId(null); setForm(defaultForm); setDialogOpen(true); }
   function openEdit(c: any) { setEditId(c.id); setForm({ contract_no: c.contract_no ?? "", name: c.name ?? "", party_a: c.party_a ?? "", party_b: c.party_b ?? "", total_amount: String(c.total_amount ?? ""), start_date: c.start_date ?? "", end_date: c.end_date ?? "", description: c.description ?? "" }); setDialogOpen(true); }
-  function submit() { editId ? updateMut.mutate({ id: editId, ...form, total_amount: Number(form.total_amount) || 0 }) : createMut.mutate({ ...form, total_amount: Number(form.total_amount) || 0 }); }
+  function submit() { const payload = { ...form, total_amount: Number(form.total_amount) || 0, start_date: form.start_date || undefined, end_date: form.end_date || undefined, description: form.description || undefined }; editId ? updateMut.mutate({ id: editId, ...payload }) : createMut.mutate(payload); }
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

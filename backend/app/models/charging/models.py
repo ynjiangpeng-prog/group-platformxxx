@@ -386,3 +386,26 @@ class SiteVisitRecord(TenantBase):
     photos: Mapped[dict | None] = mapped_column(JSONB)
     next_action: Mapped[str | None] = mapped_column(Text)
     visit_score: Mapped[int | None] = mapped_column(SmallInteger)
+
+
+class OperationMemo(TenantBase):
+    __tablename__ = "operation_memos"
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    station_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True))
+    memo_type: Mapped[str] = mapped_column(String(20), default="maintenance")
+    content: Mapped[str | None] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(20), default="normal")
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    remark: Mapped[str | None] = mapped_column(Text)
+
+
+class OperationStrategy(TenantBase):
+    __tablename__ = "operation_strategies"
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    station_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True))
+    strategy_type: Mapped[str] = mapped_column(String(20), default="pricing")
+    content: Mapped[str | None] = mapped_column(Text)
+    effective_date: Mapped[str | None] = mapped_column(Date)
+    expiry_date: Mapped[str | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    remark: Mapped[str | None] = mapped_column(Text)

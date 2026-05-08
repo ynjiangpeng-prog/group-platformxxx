@@ -1,17 +1,18 @@
 import base64
-import io
 import logging
+from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select, or_
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth import get_current_user, get_db
 from app.models.organization import User
 from app.models.erp.models import Contract
-from app.models.project.models import Project, CompanyEntity
+from app.models.project.models import Project, CompanyEntity, ConstructionLog, ProjectLine
 from app.models.finance.models import Invoice
+from app.models.petty_cash.models import PettyCashExpense, PettyCashPool
 from app.services.ai_gateway import ai_gateway
 
 router = APIRouter(prefix="/ai/ocr", tags=["AI-OCR识别"])
@@ -478,3 +479,498 @@ async def ocr_smart_classify(
             "invoice_count": ocr_data.get("invoice_count"),
         },
     }
+
+
+async def _upload_and_get_url(file: UploadFile, folder: str) -> dict | None:
+    """Upload file to MinIO and return attachment info."""
+    try:
+        from app.services.file_storage import file_storage
+        content = await file.read()
+        result = await file_storage.upload_file(content, file.filename or f"{folder}.jpg", folder=folder)
+        return {
+            "file_id": result.get("file_id", ""),
+            "object_name": result.get("object_name", ""),
+            "original_filename": file.filename or f"{folder}.jpg",
+            "size": len(content),
+            "content_type": file.content_type or "image/jpeg",
+            "url": result.get("url", ""),
+        }
+    except Exception:
+        return None
+
+
+async def _find_project_by_location(ocr_data: dict, company_id: str, db: AsyncSession) -> tuple[str | None, str | None]:
+    """Try to match OCR data to a project by location/counterparty names."""
+    keywords = []
+    for field in ("project_location", "counterparty", "receiver", "execution_unit"):
+        val = ocr_data.get(field)
+        if val and isinstance(val, str):
+            keywords.append(val.strip())
+    if not keywords:
+        return None, None
+    conditions = []
+    for kw in keywords:
+        conditions.extend([
+            Project.name.ilike(f"%{kw}%"),
+            Project.address.ilike(f"%{kw}%"),
+        ])
+    matches = (await db.execute(
+        select(Project).where(
+            Project.company_id == company_id,
+            Project.is_deleted == False,
+            or_(*conditions),
+        ).limit(3)
+    )).scalars().all()
+    if matches:
+        return str(matches[0].id), matches[0].name
+    return None, None
+
+
+# ─── Construction Log Auto-Save ───────────────────────────────────
+
+@router.post("/construction-log-auto-save")
+async def ocr_construction_log_auto_save(
+    file: UploadFile = File(...),
+    project_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """拍照→AI识别施工日志→自动创建记录。返回记录ID供确认修改。"""
+    image_b64 = await file_to_base64(file)
+    ocr_data = await ai_gateway.recognize_construction_log(image_b64)
+    if ocr_data.get("parse_error"):
+        raise HTTPException(status_code=422, detail="OCR识别结果解析失败")
+
+    # Resolve project_id
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, pname = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+
+    if not resolved_pid:
+        return {
+            "success": False,
+            "data": ocr_data,
+            "message": "无法匹配项目，请手动选择项目后重试",
+            "ocr_data": ocr_data,
+        }
+
+    log_date = ocr_data.get("date")
+    if isinstance(log_date, str):
+        try:
+            log_date = date.fromisoformat(log_date)
+        except ValueError:
+            log_date = date.today()
+    else:
+        log_date = date.today()
+
+    worker_count = ocr_data.get("worker_count") or 0
+    if isinstance(worker_count, str):
+        try:
+            worker_count = int(worker_count)
+        except ValueError:
+            worker_count = 0
+
+    log = ConstructionLog(
+        company_id=current_user.company_id,
+        created_by=str(current_user.id),
+        project_id=resolved_pid,
+        log_date=log_date,
+        weather=ocr_data.get("weather"),
+        temperature=ocr_data.get("temperature"),
+        work_content=ocr_data.get("work_content"),
+        worker_count=worker_count,
+        equipment_used=ocr_data.get("equipment_used"),
+        materials_used=ocr_data.get("materials_used"),
+        safety_status=ocr_data.get("safety_status") or "normal",
+        quality_issues=ocr_data.get("quality_issues"),
+        execution_unit=ocr_data.get("execution_unit"),
+        recorder_id=str(current_user.id),
+    )
+
+    # Attach photo
+    attachment = await _upload_and_get_url(file, "construction_logs")
+    if attachment:
+        log.photos = [attachment]
+
+    db.add(log)
+    await db.flush()
+
+    # Cost insight: estimate daily labor cost
+    project = (await db.execute(
+        select(Project).where(Project.id == resolved_pid)
+    )).scalar_one_or_none()
+    project_name = project.name if project else None
+
+    return {
+        "success": True,
+        "record_id": str(log.id),
+        "project_id": resolved_pid,
+        "project_name": project_name,
+        "ocr_data": ocr_data,
+        "log_date": log_date.isoformat(),
+        "worker_count": worker_count,
+        "message": "施工日志已创建，请核对内容",
+    }
+
+
+# ─── Petty Cash Expense Auto-Save ─────────────────────────────────
+
+@router.post("/petty-cash-auto-save")
+async def ocr_petty_cash_auto_save(
+    file: UploadFile = File(...),
+    project_id: str | None = None,
+    pool_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """拍照→AI识别备用金单据→自动创建报销记录。"""
+    image_b64 = await file_to_base64(file)
+    ocr_data = await ai_gateway.recognize_petty_cash_doc(image_b64)
+    if ocr_data.get("parse_error"):
+        raise HTTPException(status_code=422, detail="OCR识别结果解析失败")
+
+    # Resolve project
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, _ = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+
+    if not resolved_pid:
+        return {"success": False, "data": ocr_data, "message": "无法匹配项目，请手动选择"}
+
+    # Find or use provided pool
+    resolved_pool_id = pool_id
+    if not resolved_pool_id:
+        pool = (await db.execute(
+            select(PettyCashPool).where(
+                PettyCashPool.employee_id == str(current_user.id),
+                PettyCashPool.company_id == current_user.company_id,
+                PettyCashPool.status == "active",
+                PettyCashPool.is_deleted == False,
+            ).limit(1)
+        )).scalar_one_or_none()
+        if pool:
+            resolved_pool_id = str(pool.id)
+
+    expense_date = ocr_data.get("date")
+    if isinstance(expense_date, str):
+        try:
+            expense_date = date.fromisoformat(expense_date)
+        except ValueError:
+            expense_date = date.today()
+    else:
+        expense_date = date.today()
+
+    amount = ocr_data.get("amount") or 0
+    if isinstance(amount, str):
+        try:
+            amount = float(amount.replace(",", "").replace("¥", "").replace("￥", ""))
+        except ValueError:
+            amount = 0
+
+    expense = PettyCashExpense(
+        company_id=current_user.company_id,
+        created_by=str(current_user.id),
+        pool_id=resolved_pool_id,
+        project_id=resolved_pid,
+        expense_date=expense_date,
+        category=ocr_data.get("category") or "其他",
+        amount=amount,
+        description=ocr_data.get("description"),
+        invoice_count=ocr_data.get("invoice_count") or 0,
+        status="pending",
+        remark=ocr_data.get("remark"),
+    )
+
+    attachment = await _upload_and_get_url(file, "petty_cash")
+    if attachment:
+        expense.attachments = [attachment]
+
+    db.add(expense)
+    await db.flush()
+
+    return {
+        "success": True,
+        "record_id": str(expense.id),
+        "project_id": resolved_pid,
+        "ocr_data": ocr_data,
+        "amount": amount,
+        "expense_date": expense_date.isoformat(),
+        "message": "备用金报销已创建，请核对后提交",
+    }
+
+
+# ─── Payment Doc Auto-Save (creates ProjectLine) ──────────────────
+
+@router.post("/payment-doc-auto-save")
+async def ocr_payment_doc_auto_save(
+    file: UploadFile = File(...),
+    project_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """拍照→AI识别付款凭证→自动创建项目成本记录。"""
+    image_b64 = await file_to_base64(file)
+    ocr_data = await ai_gateway.recognize_payment_doc(image_b64)
+    if ocr_data.get("parse_error"):
+        raise HTTPException(status_code=422, detail="OCR识别结果解析失败")
+
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, _ = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+
+    if not resolved_pid:
+        return {"success": False, "data": ocr_data, "message": "无法匹配项目，请手动选择"}
+
+    amount = ocr_data.get("total_amount") or 0
+    if isinstance(amount, str):
+        try:
+            amount = float(amount.replace(",", "").replace("¥", "").replace("￥", ""))
+        except ValueError:
+            amount = 0
+
+    record_date = ocr_data.get("date")
+    if isinstance(record_date, str):
+        try:
+            record_date = date.fromisoformat(record_date)
+        except ValueError:
+            record_date = date.today()
+    else:
+        record_date = date.today()
+
+    doc_subtype = ocr_data.get("doc_subtype") or "other"
+    line_type_map = {
+        "delivery_note": "material",
+        "expense_record": "expense",
+        "payment_proof": "expense",
+        "labor_record": "labor",
+        "material_list": "material",
+        "other": "expense",
+    }
+
+    description_parts = []
+    if ocr_data.get("counterparty"):
+        description_parts.append(ocr_data["counterparty"])
+    if ocr_data.get("description"):
+        description_parts.append(ocr_data["description"])
+    if ocr_data.get("doc_subtype_label"):
+        description_parts.append(f"[{ocr_data['doc_subtype_label']}]")
+    description = " - ".join(description_parts) or ocr_data.get("remark") or "付款凭证"
+
+    line = ProjectLine(
+        company_id=current_user.company_id,
+        created_by=str(current_user.id),
+        project_id=resolved_pid,
+        line_type=line_type_map.get(doc_subtype, "expense"),
+        amount=amount,
+        source_type="ocr_payment_doc",
+        description=description,
+        record_date=record_date,
+    )
+
+    db.add(line)
+    await db.flush()
+
+    return {
+        "success": True,
+        "record_id": str(line.id),
+        "project_id": resolved_pid,
+        "ocr_data": ocr_data,
+        "amount": amount,
+        "line_type": line.line_type,
+        "record_date": record_date.isoformat(),
+        "message": "付款凭证已创建为成本记录，请核对",
+    }
+
+
+# ─── One-Click: Smart Classify + Auto-Save ────────────────────────
+
+@router.post("/scan-and-save")
+async def ocr_scan_and_save(
+    file: UploadFile = File(...),
+    project_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """拍照→AI自动判断类型→识别→直接创建对应记录。一个接口完成全流程。"""
+    image_b64 = await file_to_base64(file)
+
+    # Step 1: Classify document type
+    classify_prompt = (
+        "判断这张图片属于哪类文档，只返回JSON：\n"
+        '{"document_type":"contract|invoice|receipt|payment_doc|construction_log|petty_cash_settlement"}\n'
+        "类型定义：contract=合同 invoice=发票 payment_doc=送货单/付款凭据 "
+        "construction_log=施工日志 petty_cash_settlement=报销单 receipt=小票"
+    )
+    classify_result = await ai_gateway.provider.vision(image_b64, classify_prompt)
+    classify_data = ai_gateway._parse_json(classify_result)
+    doc_type = classify_data.get("document_type", "invoice")
+
+    # Step 2: Route to appropriate handler
+    route_map = {
+        "contract": _auto_save_contract,
+        "invoice": _auto_save_invoice,
+        "construction_log": _auto_save_construction_log,
+        "payment_doc": _auto_save_payment_doc,
+        "petty_cash_settlement": _auto_save_petty_cash,
+        "receipt": _auto_save_petty_cash,
+    }
+    handler = route_map.get(doc_type, _auto_save_invoice)
+    return await handler(image_b64, file, project_id, current_user, db, doc_type)
+
+
+async def _auto_save_contract(image_b64, file, project_id, current_user, db, doc_type):
+    ocr_data = await ai_gateway.recognize_contract(image_b64)
+    if ocr_data.get("parse_error"):
+        return {"success": False, "document_type": doc_type, "message": "OCR解析失败", "ocr_data": ocr_data}
+    entity_match = await match_entity_from_ocr(ocr_data, str(current_user.company_id), db)
+    ocr_data.update(entity_match)
+    contract = Contract(
+        company_id=current_user.company_id, created_by=str(current_user.id),
+        contract_no=ocr_data.get("contract_no") or "", name=ocr_data.get("contract_name") or "",
+        contract_type="other", party_a=ocr_data.get("party_a"), party_b=ocr_data.get("party_b"),
+        signing_date=ocr_data.get("sign_date"), start_date=ocr_data.get("start_date"),
+        end_date=ocr_data.get("end_date"), total_amount=ocr_data.get("amount"),
+        project_id=project_id, entity_id=ocr_data.get("suggested_entity_id"),
+        direction=ocr_data.get("direction"), counterparty=ocr_data.get("counterparty"),
+        status="draft",
+    )
+    db.add(contract)
+    await db.flush()
+    return {"success": True, "document_type": doc_type, "record_id": str(contract.id),
+            "record_type": "contract", "ocr_data": ocr_data, "message": "合同已创建为草稿"}
+
+
+async def _auto_save_invoice(image_b64, file, project_id, current_user, db, doc_type):
+    ocr_data = await ai_gateway.recognize_invoice(image_b64)
+    if ocr_data.get("parse_error"):
+        return {"success": False, "document_type": doc_type, "message": "OCR解析失败", "ocr_data": ocr_data}
+    invoice = Invoice(
+        company_id=current_user.company_id, created_by=str(current_user.id),
+        invoice_type=ocr_data.get("invoice_type") or "增值税发票", direction="in",
+        invoice_code=ocr_data.get("invoice_code"), invoice_no=ocr_data.get("invoice_no"),
+        issue_date=ocr_data.get("invoice_date"), seller_name=ocr_data.get("seller_name"),
+        buyer_name=ocr_data.get("buyer_name"), amount_before_tax=ocr_data.get("amount_without_tax"),
+        tax_rate=ocr_data.get("tax_rate"), tax_amount=ocr_data.get("tax_amount"),
+        total_amount=ocr_data.get("total_amount"), items=ocr_data.get("items"),
+        check_status="unchecked", project_id=project_id,
+    )
+    db.add(invoice)
+    await db.flush()
+    return {"success": True, "document_type": doc_type, "record_id": str(invoice.id),
+            "record_type": "invoice", "ocr_data": ocr_data, "message": "发票已创建"}
+
+
+async def _auto_save_construction_log(image_b64, file, project_id, current_user, db, doc_type):
+    ocr_data = await ai_gateway.recognize_construction_log(image_b64)
+    if ocr_data.get("parse_error"):
+        return {"success": False, "document_type": doc_type, "message": "OCR解析失败", "ocr_data": ocr_data}
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, _ = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+    if not resolved_pid:
+        return {"success": False, "document_type": doc_type, "ocr_data": ocr_data, "message": "无法匹配项目"}
+    log_date = ocr_data.get("date")
+    try:
+        log_date = date.fromisoformat(log_date) if isinstance(log_date, str) else date.today()
+    except ValueError:
+        log_date = date.today()
+    worker_count = ocr_data.get("worker_count") or 0
+    try:
+        worker_count = int(worker_count)
+    except (ValueError, TypeError):
+        worker_count = 0
+    log = ConstructionLog(
+        company_id=current_user.company_id, created_by=str(current_user.id),
+        project_id=resolved_pid, log_date=log_date, weather=ocr_data.get("weather"),
+        temperature=ocr_data.get("temperature"), work_content=ocr_data.get("work_content"),
+        worker_count=worker_count, equipment_used=ocr_data.get("equipment_used"),
+        materials_used=ocr_data.get("materials_used"),
+        safety_status=ocr_data.get("safety_status") or "normal",
+        execution_unit=ocr_data.get("execution_unit"), recorder_id=str(current_user.id),
+    )
+    db.add(log)
+    await db.flush()
+    return {"success": True, "document_type": doc_type, "record_id": str(log.id),
+            "record_type": "construction_log", "project_id": resolved_pid,
+            "worker_count": worker_count, "ocr_data": ocr_data, "message": "施工日志已创建"}
+
+
+async def _auto_save_payment_doc(image_b64, file, project_id, current_user, db, doc_type):
+    ocr_data = await ai_gateway.recognize_payment_doc(image_b64)
+    if ocr_data.get("parse_error"):
+        return {"success": False, "document_type": doc_type, "message": "OCR解析失败", "ocr_data": ocr_data}
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, _ = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+    if not resolved_pid:
+        return {"success": False, "document_type": doc_type, "ocr_data": ocr_data, "message": "无法匹配项目"}
+    amount = ocr_data.get("total_amount") or 0
+    try:
+        amount = float(str(amount).replace(",", "").replace("¥", "").replace("￥", ""))
+    except (ValueError, TypeError):
+        amount = 0
+    record_date = ocr_data.get("date")
+    try:
+        record_date = date.fromisoformat(record_date) if isinstance(record_date, str) else date.today()
+    except ValueError:
+        record_date = date.today()
+    subtype = ocr_data.get("doc_subtype") or "other"
+    line_type = {"delivery_note": "material", "labor_record": "labor"}.get(subtype, "expense")
+    description = f"{ocr_data.get('counterparty', '')} - {ocr_data.get('description', '')}".strip(" -")
+    line = ProjectLine(
+        company_id=current_user.company_id, created_by=str(current_user.id),
+        project_id=resolved_pid, line_type=line_type, amount=amount,
+        source_type="ocr_payment_doc", description=description or "付款凭证",
+        record_date=record_date,
+    )
+    db.add(line)
+    await db.flush()
+    return {"success": True, "document_type": doc_type, "record_id": str(line.id),
+            "record_type": "project_line", "project_id": resolved_pid,
+            "amount": amount, "ocr_data": ocr_data, "message": "付款凭证已创建为成本记录"}
+
+
+async def _auto_save_petty_cash(image_b64, file, project_id, current_user, db, doc_type):
+    ocr_data = await ai_gateway.recognize_petty_cash_doc(image_b64)
+    if ocr_data.get("parse_error"):
+        return {"success": False, "document_type": doc_type, "message": "OCR解析失败", "ocr_data": ocr_data}
+    resolved_pid = project_id
+    if not resolved_pid:
+        pid, _ = await _find_project_by_location(ocr_data, str(current_user.company_id), db)
+        resolved_pid = pid
+    if not resolved_pid:
+        return {"success": False, "document_type": doc_type, "ocr_data": ocr_data, "message": "无法匹配项目"}
+    pool = (await db.execute(
+        select(PettyCashPool).where(
+            PettyCashPool.employee_id == str(current_user.id),
+            PettyCashPool.company_id == current_user.company_id,
+            PettyCashPool.status == "active", PettyCashPool.is_deleted == False,
+        ).limit(1)
+    )).scalar_one_or_none()
+    amount = ocr_data.get("amount") or 0
+    try:
+        amount = float(str(amount).replace(",", "").replace("¥", "").replace("￥", ""))
+    except (ValueError, TypeError):
+        amount = 0
+    expense_date = ocr_data.get("date")
+    try:
+        expense_date = date.fromisoformat(expense_date) if isinstance(expense_date, str) else date.today()
+    except ValueError:
+        expense_date = date.today()
+    expense = PettyCashExpense(
+        company_id=current_user.company_id, created_by=str(current_user.id),
+        pool_id=str(pool.id) if pool else None, project_id=resolved_pid,
+        expense_date=expense_date, category=ocr_data.get("category") or "其他",
+        amount=amount, description=ocr_data.get("description"),
+        status="pending", remark=ocr_data.get("remark"),
+    )
+    db.add(expense)
+    await db.flush()
+    return {"success": True, "document_type": doc_type, "record_id": str(expense.id),
+            "record_type": "petty_cash_expense", "project_id": resolved_pid,
+            "amount": amount, "ocr_data": ocr_data, "message": "报销记录已创建"}

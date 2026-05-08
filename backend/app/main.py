@@ -14,6 +14,7 @@ from app.api.v1.organization.router import router as org_router
 from app.api.v1.project.router import router as project_router
 from app.api.v1.project.dashboard_router import router as project_dashboard_router
 from app.api.v1.project.location_router import router as project_location_router
+from app.api.v1.project.labor_router import router as labor_router
 from app.api.v1.charging.router import router as charging_router
 from app.api.v1.charging.roi_router import router as charging_roi_router
 from app.api.v1.finance.router import router as finance_router
@@ -25,6 +26,7 @@ from app.api.v1.ai.router import router as ai_router
 from app.api.v1.ai.ocr_router import router as ai_ocr_router
 from app.api.v1.ai.gateway_router import router as ai_gateway_router
 from app.api.v1.ai.smart_router import router as ai_smart_router
+from app.api.v1.ai.stream_router import router as ai_stream_router
 from app.api.v1.business.router import router as business_router
 from app.api.v1.petty_cash.router import router as petty_cash_router
 from app.api.v1.travel.router import router as travel_router
@@ -51,6 +53,9 @@ from app.middleware.export_audit import ExportAuditMiddleware
 from app.core.structured_logging import setup_structured_logging
 from app.services.sentry_integration import init_sentry
 from app.api.v1.predictions.router import router as predictions_router
+from app.api.v1.agent_evo.router import router as agent_evo_router
+from app.api.v1.agent_evo.workflow_router import router as agent_evo_workflow_router
+from app.api.v1.business_twin.router import router as business_twin_router
 
 
 @asynccontextmanager
@@ -104,6 +109,7 @@ app.include_router(org_router, prefix="/api/v1")
 app.include_router(project_router, prefix="/api/v1")
 app.include_router(project_dashboard_router, prefix="/api/v1")
 app.include_router(project_location_router, prefix="/api/v1")
+app.include_router(labor_router, prefix="/api/v1")
 app.include_router(charging_router, prefix="/api/v1")
 app.include_router(charging_roi_router, prefix="/api/v1")
 app.include_router(finance_router, prefix="/api/v1")
@@ -115,6 +121,7 @@ app.include_router(ai_router, prefix="/api/v1")
 app.include_router(ai_ocr_router, prefix="/api/v1")
 app.include_router(ai_gateway_router, prefix="/api/v1")
 app.include_router(ai_smart_router, prefix="/api/v1")
+app.include_router(ai_stream_router, prefix="/api/v1")
 app.include_router(business_router, prefix="/api/v1")
 app.include_router(petty_cash_router, prefix="/api/v1")
 app.include_router(travel_router, prefix="/api/v1")
@@ -132,6 +139,9 @@ app.include_router(intelligence_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
 app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(predictions_router, prefix="/api/v1")
+app.include_router(agent_evo_router, prefix="/api/v1")
+app.include_router(agent_evo_workflow_router, prefix="/api/v1")
+app.include_router(business_twin_router, prefix="/api/v1")
 # app.include_router(agent_router, prefix="/api/v1")
 # 代码安全扫描（已禁用）
 # app.include_router(code_security_router, prefix="/api/v1")

@@ -2,12 +2,12 @@ import base64
 import io
 import json
 import logging
+import os
 import time
-from typing import Protocol, runtime_checkable
 
 import httpx
 
-from app.core.ai import AI_API_KEY, AI_API_BASE
+from app.core.ai import AI_API_KEY, AI_API_BASE, PROVIDERS, ACTIVE_PROVIDER
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,19 @@ TASK_MODELS = {
     "chat": "glm-5.1",
     "code": "glm-5.1",
     "default": "glm-5.1",
+    # 任务隧道 — 辅助LLM调用走本地模型，省token + 保隐私
+    "quality_gate": "gemma4:26b",
+    "memory_extract": "gemma4:26b",
+    "error_recovery": "gemma4:26b",
+    # DeepSeek — 深度推理任务（进化、评估、反思）
+    "evolution_generate": "deepseek-chat",
+    "evolution_eval": "deepseek-chat",
+    "reflexion": "deepseek-reasoner",
+    "dataset_build": "deepseek-chat",
 }
+
+# 任务隧道：哪些任务路由到本地provider
+TUNNEL_TASKS = {"quality_gate", "memory_extract", "error_recovery"}
 
 
 def get_model_for_task(task: str) -> str:
@@ -32,9 +44,13 @@ async def sync_models_from_db(db):
     result = await db.execute(
         select(SystemConfigKV).where(SystemConfigKV.key.in_([
             "ai_vision_model", "ai_reasoning_model", "ai_api_key", "ai_api_base",
+            "ai_provider",
         ]))
     )
     rows = {r.key: r.value for r in result.scalars().all()}
+
+    if rows.get("ai_provider"):
+        await ai_gateway.switch_provider(rows["ai_provider"])
 
     if rows.get("ai_api_key"):
         ai_gateway.provider.api_key = rows["ai_api_key"]
@@ -53,20 +69,22 @@ async def sync_models_from_db(db):
         TASK_MODELS["reasoning"] = rows["ai_reasoning_model"]
         TASK_MODELS["chat"] = rows["ai_reasoning_model"]
 
-    logger.info(f"AI config loaded from DB: {TASK_MODELS}")
+    logger.info(f"AI config loaded from DB: provider={ai_gateway.provider_id} models={TASK_MODELS}")
 
 
-@runtime_checkable
-class AIProvider(Protocol):
-    async def chat(self, messages: list[dict], **kwargs) -> str: ...
-    async def vision(self, image_base64: str, prompt: str, **kwargs) -> str: ...
-    async def extract_text(self, image_base64: str) -> str: ...
+class OpenAICompatibleProvider:
+    """Generic provider that works with any OpenAI-compatible /chat/completions API.
 
+    Supported providers:
+    - Zhipu AI (智谱): open.bigmodel.cn
+    - OpenAI: api.openai.com
+    - Kimi (Moonshot): api.moonshot.cn
+    - NVIDIA NIM: integrate.api.nvidia.com
+    """
 
-class NVIDIAProvider:
-    def __init__(self):
-        self.api_key = AI_API_KEY
-        self.base_url = AI_API_BASE
+    def __init__(self, api_key: str | None = None, base_url: str | None = None):
+        self.api_key = api_key or AI_API_KEY
+        self.base_url = base_url or AI_API_BASE
         self._client: httpx.AsyncClient | None = None
         self._token_usage = {"total_tokens": 0, "request_count": 0}
 
@@ -112,10 +130,33 @@ class NVIDIAProvider:
     async def chat(self, messages: list[dict], model: str = None, **kwargs) -> str:
         model = model or get_model_for_task("chat")
         payload = {"model": model, "messages": messages, **kwargs}
-        if "flash" not in model:
+        if "flash" not in model and "mini" not in model:
             payload.update({"temperature": 0.3, "max_tokens": 4096})
         data = await self._request(payload)
         return self._extract_content(data)
+
+    async def stream_chat(self, messages: list[dict], model: str = None, **kwargs):
+        """Stream chat completions using SSE."""
+        model = model or get_model_for_task("chat")
+        payload = {"model": model, "messages": messages, "stream": True, **kwargs}
+        if "flash" not in model and "mini" not in model:
+            payload.update({"temperature": 0.3, "max_tokens": 4096})
+
+        async with self.client.stream("POST", "chat/completions", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield content
+                    except json.JSONDecodeError:
+                        continue
 
     async def vision(self, image_base64: str, prompt: str, model: str = None, **kwargs) -> str:
         model = model or get_model_for_task("ocr_vision")
@@ -130,7 +171,7 @@ class NVIDIAProvider:
             }
         ]
         payload = {"model": model, "messages": messages, **kwargs}
-        if "flash" not in model:
+        if "flash" not in model and "mini" not in model:
             payload.update({"temperature": 0.2, "max_tokens": 4096})
         data = await self._request(payload)
         result = self._extract_content(data)
@@ -204,6 +245,18 @@ class NVIDIAProvider:
         prompt = "请识别并提取图片中的所有文字内容，按原始格式返回纯文本。"
         return await self.vision(image_base64, prompt, model=model)
 
+    async def test_connection(self, model: str | None = None) -> dict:
+        """Test API connectivity with a minimal request."""
+        model = model or get_model_for_task("chat")
+        try:
+            resp = await self.chat(
+                [{"role": "user", "content": "你好，请简短回复确认连接正常。"}],
+                model=model,
+            )
+            return {"success": True, "model": model, "reply": resp[:200]}
+        except Exception as e:
+            return {"success": False, "model": model, "error": str(e)}
+
     def get_usage(self) -> dict:
         return {**self._token_usage}
 
@@ -214,8 +267,145 @@ class NVIDIAProvider:
 
 class AIGateway:
     def __init__(self):
-        self.provider: NVIDIAProvider = NVIDIAProvider()
+        self.provider_id: str = ACTIVE_PROVIDER
+        self.provider: OpenAICompatibleProvider = OpenAICompatibleProvider()
+        self._local_provider: OpenAICompatibleProvider | None = None
+        self._deepseek_provider: OpenAICompatibleProvider | None = None
         self._status = {"initialized_at": time.time()}
+
+    @property
+    def local_provider(self) -> OpenAICompatibleProvider:
+        """本地Ollama provider（懒初始化）"""
+        if self._local_provider is None:
+            local_config = PROVIDERS.get("local")
+            if local_config:
+                self._local_provider = OpenAICompatibleProvider(
+                    api_key="ollama",  # Ollama不需要真实key，但不能为空
+                    base_url=local_config["base_url"],
+                )
+        return self._local_provider
+
+    async def tunnel_chat(
+        self, messages: list[dict], task: str = "quality_gate", **kwargs,
+    ) -> str:
+        """任务隧道 — 优先走本地模型，失败自动fallback到云端
+
+        用于：quality_gate、memory_extract、error_recovery等辅助任务。
+        这些任务对模型能力要求不高，但涉及业务隐私数据。
+        """
+        local_model = TASK_MODELS.get(task)
+        if local_model and task in TUNNEL_TASKS:
+            try:
+                result = await self.local_provider.chat(messages, model=local_model, **kwargs)
+                if result and len(result.strip()) > 5:
+                    return result
+            except Exception as e:
+                logger.warning(f"本地模型调用失败({task})，回退云端: {e}")
+
+        # fallback到云端
+        cloud_model = "glm-4-flash"  # 辅助任务用flash即可
+        return await self.provider.chat(messages, model=cloud_model, **kwargs)
+
+    # DeepSeek provider（懒初始化）
+
+    @property
+    def deepseek_provider(self) -> OpenAICompatibleProvider | None:
+        config = PROVIDERS.get("deepseek")
+        key = os.getenv(config["api_key_env"]) if config else None
+        if not config or not key:
+            return None
+        if self._deepseek_provider is None:
+            self._deepseek_provider = OpenAICompatibleProvider(
+                api_key=key,
+                base_url=config["base_url"],
+            )
+        return self._deepseek_provider
+
+    async def routed_chat(
+        self, messages: list[dict], task: str = "chat", **kwargs,
+    ) -> str:
+        """智能路由：根据任务类型自动选择provider和model
+
+        路由策略：
+        - quality_gate/memory_extract/error_recovery → 本地Gemma（隐私+省钱）
+        - evolution_generate/evolution_eval/reflexion → DeepSeek（推理强）
+        - chat/reasoning/code → GLM-5.1（中文业务）
+        - 其他 → 当前默认provider
+        """
+        model = TASK_MODELS.get(task)
+
+        # 任务隧道：走本地
+        if task in TUNNEL_TASKS:
+            return await self.tunnel_chat(messages, task=task, **kwargs)
+
+        # DeepSeek任务
+        if model and model.startswith("deepseek"):
+            ds = self.deepseek_provider
+            if ds:
+                try:
+                    return await ds.chat(messages, model=model, **kwargs)
+                except Exception as e:
+                    logger.warning(f"DeepSeek调用失败({task})，回退默认: {e}")
+            # fallback到默认provider
+            return await self.provider.chat(messages, **kwargs)
+
+        # 默认：用当前provider + task对应的model
+        if model:
+            return await self.provider.chat(messages, model=model, **kwargs)
+        return await self.provider.chat(messages, **kwargs)
+
+    async def switch_provider(self, provider_id: str, api_key: str | None = None):
+        """Switch to a different AI provider."""
+        if provider_id not in PROVIDERS:
+            raise ValueError(f"Unknown provider: {provider_id}. Available: {list(PROVIDERS.keys())}")
+
+        config = PROVIDERS[provider_id]
+        key = api_key or os.getenv(config["api_key_env"])  # noqa: F821
+
+        await self.provider.close()
+        self.provider = OpenAICompatibleProvider(
+            api_key=key,
+            base_url=config["base_url"],
+        )
+        self.provider_id = provider_id
+
+        # Update task models to use provider's default model
+        # 注意：只更新通用任务，不影响隧道(local)和DeepSeek专用key
+        default_model = config["default_model"]
+        TASK_MODELS["default"] = default_model
+        TASK_MODELS["chat"] = default_model
+        TASK_MODELS["reasoning"] = default_model
+        TASK_MODELS["code"] = default_model
+
+        # Try to find a vision model from the provider
+        vision_models = [m for m in config["models"] if m["category"] == "vision"]
+        if vision_models:
+            TASK_MODELS["ocr_vision"] = vision_models[0]["id"]
+            TASK_MODELS["ocr_extract"] = vision_models[0]["id"]
+
+        logger.info(f"Switched AI provider to {provider_id} ({config['name']}), base_url={config['base_url']}")
+
+    def get_provider_info(self) -> dict:
+        """Get current provider info with all available providers."""
+        current = {
+            "id": self.provider_id,
+            "name": PROVIDERS.get(self.provider_id, {}).get("name", "Custom"),
+            "base_url": self.provider.base_url,
+            "api_key_set": bool(self.provider.api_key),
+            "models": PROVIDERS.get(self.provider_id, {}).get("models", []),
+        }
+        available = []
+        for pid, p in PROVIDERS.items():
+            available.append({
+                "id": pid,
+                "name": p["name"],
+                "base_url": p["base_url"],
+                "default_model": p["default_model"],
+                "model_count": len(p["models"]),
+                "api_key_env": p["api_key_env"],
+                "api_key_set": bool(os.getenv(p["api_key_env"])),  # noqa: F821
+            })
+        return {"current": current, "available": available}
 
     async def recognize_contract(self, image_base64: str) -> dict:
         prompt = (
@@ -504,7 +694,9 @@ class AIGateway:
 
     def get_status(self) -> dict:
         return {
+            "provider_id": self.provider_id,
             "provider": type(self.provider).__name__,
+            "base_url": self.provider.base_url,
             "api_key_configured": bool(self.provider.api_key),
             "usage": self.provider.get_usage(),
             "task_models": TASK_MODELS,
@@ -542,6 +734,10 @@ class AIGateway:
                 except json.JSONDecodeError:
                     continue
         return {"raw_text": text, "parse_error": True}
+
+    def parse_json_response(self, text: str) -> dict:
+        """公开的JSON解析方法，供其他模块使用"""
+        return self._parse_json(text)
 
 
 ai_gateway = AIGateway()

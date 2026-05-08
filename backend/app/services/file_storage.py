@@ -54,6 +54,19 @@ class FileStorageService:
     async def delete_file(self, object_name: str):
         self.client.remove_object(self.bucket, object_name)
 
+    async def list_files(self, folder: str = "uploads") -> list[dict]:
+        self.ensure_bucket()
+        objects = self.client.list_objects(self.bucket, prefix=folder + "/", recursive=True)
+        result = []
+        for obj in objects:
+            result.append({
+                "object_name": obj.object_name,
+                "size": obj.size,
+                "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
+                "url": f"/api/v1/files/{obj.object_name}",
+            })
+        return result
+
     def _guess_content_type(self, filename: str) -> str:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         types = {

@@ -40,7 +40,6 @@ class RefreshRequest(BaseModel):
 
 
 @router.post("/login", response_model=TokenResponse)
-@rate_limit(max_requests=5, window_seconds=60)
 async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.username == req.username, User.is_deleted == False))
     user = result.scalar_one_or_none()

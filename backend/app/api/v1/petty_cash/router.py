@@ -50,8 +50,9 @@ class FundUpdate(BaseModel):
 
 
 class ExpenseCreate(BaseModel):
-    pool_id: str
-    project_id: str
+    pool_id: str | None = None
+    fund_id: str | None = None
+    project_id: str = ""
     expense_date: date
     category: str
     amount: float = Field(..., gt=0)
@@ -437,11 +438,27 @@ async def fund_stats(
             PettyCashPool.status == "active",
         )
     )).one()
+    settling = (await db.execute(
+        select(func.count()).select_from(PettyCashExpense).where(
+            PettyCashExpense.is_deleted == False,
+            PettyCashExpense.company_id == current_user.company_id,
+            PettyCashExpense.status.in_(["pending", "submitted", "finance_approved"]),
+        )
+    )).scalar() or 0
+    overdue_funds = (await db.execute(
+        select(func.count()).select_from(PettyCashFund).where(
+            PettyCashFund.is_deleted == False,
+            PettyCashFund.company_id == current_user.company_id,
+            PettyCashFund.expected_return_date < date.today(),
+            PettyCashFund.status == "active",
+        )
+    )).scalar() or 0
     return {
-        "total_received": float(r.total_received or 0),
+        "total_amount": float(r.total_received or 0),
         "total_used": float(r.total_used or 0),
-        "total_balance": float(r.total_balance or 0),
-        "pool_count": r.pool_count or 0,
+        "total_remaining": float(r.total_balance or 0),
+        "settling_count": settling,
+        "overdue_count": overdue_funds,
     }
 
 
@@ -514,13 +531,59 @@ async def create_expense(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    pool = await _get_pool(db, body.pool_id, current_user.company_id)
+    # Resolve pool_id from fund_id if not directly provided
+    pool_id = body.pool_id
+    if not pool_id and body.fund_id:
+        fund = (await db.execute(
+            select(PettyCashFund).where(
+                PettyCashFund.id == body.fund_id,
+                PettyCashFund.company_id == current_user.company_id,
+                PettyCashFund.is_deleted == False,
+            )
+        )).scalar_one_or_none()
+        if fund and fund.pool_id:
+            pool_id = str(fund.pool_id)
+        elif fund:
+            # Fund has no pool, auto-create or use fund's employee pool
+            emp_pool = (await db.execute(
+                select(PettyCashPool).where(
+                    PettyCashPool.employee_id == fund.employee_id,
+                    PettyCashPool.company_id == current_user.company_id,
+                    PettyCashPool.is_deleted == False,
+                )
+            )).scalar_one_or_none()
+            if emp_pool:
+                pool_id = str(emp_pool.id)
+
+    if not pool_id:
+        # Auto-create pool for the user
+        emp_pool = (await db.execute(
+            select(PettyCashPool).where(
+                PettyCashPool.employee_id == current_user.id,
+                PettyCashPool.company_id == current_user.company_id,
+                PettyCashPool.is_deleted == False,
+            )
+        )).scalar_one_or_none()
+        if emp_pool:
+            pool_id = str(emp_pool.id)
+        else:
+            new_pool = PettyCashPool(
+                company_id=current_user.company_id,
+                employee_id=current_user.id,
+                total_received=0, total_used=0, balance=0,
+                status="active",
+            )
+            db.add(new_pool)
+            await db.flush()
+            pool_id = str(new_pool.id)
+
+    pool = await _get_pool(db, pool_id, current_user.company_id)
     if pool.status != "active":
         raise HTTPException(status_code=400, detail="资金池状态不允许新增支出")
 
     pending_sum = (await db.execute(
         select(func.coalesce(func.sum(PettyCashExpense.amount), 0)).where(
-            PettyCashExpense.pool_id == body.pool_id,
+            PettyCashExpense.pool_id == pool_id,
             PettyCashExpense.is_deleted == False,
             PettyCashExpense.company_id == current_user.company_id,
             PettyCashExpense.status.in_(["pending", "submitted", "finance_approved"]),
@@ -531,8 +594,9 @@ async def create_expense(
         raise HTTPException(status_code=400, detail=f"支出金额超过可用余额(余额¥{pool.balance or 0}，待核销¥{pending_sum}，可用¥{available:.2f})")
 
     expense = PettyCashExpense(
-        pool_id=body.pool_id,
-        project_id=body.project_id,
+        pool_id=pool_id,
+        fund_id=body.fund_id,
+        project_id=body.project_id or None,
         expense_date=body.expense_date,
         category=body.category,
         amount=body.amount,
@@ -1219,3 +1283,159 @@ async def batch_leader_approve_expenses(
             count += 1
     await db.commit()
     return {"detail": f"已审批 {count} 条"}
+
+
+# ─── Pool Management Endpoints ───
+
+class PoolAdjustBody(BaseModel):
+    amount: float
+    reason: str
+
+
+@router.post("/pools/sync-from-bank")
+async def sync_from_bank(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """从银行流水自动同步到备用金池"""
+    await _check_perm(current_user, db, "petty_cash:sync")
+
+    from app.models.project.models import BankTransaction
+
+    employees = (await db.execute(
+        select(User).where(
+            User.company_id == current_user.company_id,
+            User.is_deleted == False,
+        )
+    )).scalars().all()
+    name_map: dict[str, str] = {}
+    for emp in employees:
+        if emp.real_name:
+            name_map[emp.real_name.strip()] = str(emp.id)
+        if emp.username:
+            name_map[emp.username.strip()] = str(emp.id)
+
+    txs = (await db.execute(
+        select(BankTransaction).where(
+            BankTransaction.company_id == current_user.company_id,
+            BankTransaction.is_deleted == False,
+            BankTransaction.tx_amount > 0,
+            BankTransaction.source != "petty_cash_synced",
+        ).order_by(BankTransaction.tx_date)
+    )).scalars().all()
+
+    synced = 0
+    for tx in txs:
+        cp = (tx.counterparty or "").strip()
+        matched_emp_id = name_map.get(cp)
+        if not matched_emp_id:
+            for name, eid in name_map.items():
+                if name in cp or cp in name:
+                    matched_emp_id = eid
+                    break
+        if not matched_emp_id:
+            continue
+
+        pool = await _get_or_create_pool(db, current_user.company_id, matched_emp_id)
+        pool.total_received = float(pool.total_received or 0) + float(tx.tx_amount)
+        _recalc_pool(pool)
+        tx.source = "petty_cash_synced"
+        synced += 1
+
+    await db.flush()
+    return {"synced_count": synced}
+
+
+@router.post("/pools/{pool_id}/adjust")
+async def adjust_pool(
+    pool_id: str,
+    body: PoolAdjustBody,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员手动调整备用金池余额"""
+    await _check_perm(current_user, db, "petty_cash:adjust")
+    pool = await _get_pool(db, pool_id, current_user.company_id)
+    pool.total_received = float(pool.total_received or 0) + body.amount
+    _recalc_pool(pool)
+    await db.flush()
+    await db.refresh(pool)
+    return _to_dict(pool)
+
+
+# ─── Employee Self-Service ───
+
+@router.post("/expenses/{expense_id}/cancel")
+async def cancel_expense(
+    expense_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """员工自行取消核销"""
+    expense = await _get_expense(db, expense_id, current_user.company_id)
+    if expense.status not in ("pending", "rejected"):
+        raise HTTPException(status_code=400, detail="只有待审核或已驳回的核销可以取消")
+
+    my_pool = await _get_or_create_pool(db, current_user.company_id, str(current_user.id))
+    if expense.pool_id and str(expense.pool_id) != str(my_pool.id):
+        pool = await _get_pool(db, str(expense.pool_id), current_user.company_id)
+        if str(pool.employee_id) != str(current_user.id):
+            raise HTTPException(status_code=403, detail="不能取消其他人的核销")
+
+    expense.status = "cancelled"
+    await db.flush()
+    return _to_dict(expense)
+
+
+@router.post("/expenses/{expense_id}/upload-attachment")
+async def upload_expense_attachment(
+    expense_id: str,
+    file: UploadFile = File(...),
+    attachment_type: str = "payment_proof",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """上传核销附件（付款证明或发票）"""
+    expense = await _get_expense(db, expense_id, current_user.company_id)
+    if expense.status not in ("pending", "rejected"):
+        raise HTTPException(status_code=400, detail="当前状态不允许上传附件")
+
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小不能超过20MB")
+
+    try:
+        from app.services.file_storage import file_storage
+        result = await file_storage.upload_file(content, file.filename or "attachment", folder="petty-cash")
+        file_info = {
+            "url": result.get("url", ""),
+            "original_filename": file.filename,
+            "size": len(content),
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "type": attachment_type,
+        }
+    except Exception:
+        image_b64 = base64.b64encode(content).decode("utf-8")
+        file_info = {
+            "data_url": f"data:{file.content_type};base64,{image_b64[:100]}...",
+            "base64_length": len(image_b64),
+            "original_filename": file.filename,
+            "size": len(content),
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "type": attachment_type,
+        }
+
+    if attachment_type == "invoice":
+        attachments = list(expense.invoice_files or [])
+        attachments.append(file_info)
+        expense.invoice_files = attachments
+    else:
+        attachments = list(expense.attachments or [])
+        attachments.append(file_info)
+        expense.attachments = attachments
+
+    await db.flush()
+    await db.refresh(expense)
+    return {"success": True, "file": file_info}

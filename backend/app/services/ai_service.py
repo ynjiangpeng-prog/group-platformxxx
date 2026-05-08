@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -66,12 +67,40 @@ async def _call_ai(system_prompt: str, user_prompt: str, model: str = None) -> s
         "temperature": 0.3,
         "max_tokens": 2000,
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
             f"{AI_API_BASE}/chat/completions", headers=headers, json=payload
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
+
+
+# --- AI result cache (TTL 30 min per company+endpoint) ---
+_ai_cache: dict[str, tuple[float, dict]] = {}
+_AI_CACHE_TTL = 1800  # 30 minutes
+
+
+def _cache_key(prefix: str, company_id: str) -> str:
+    return f"{prefix}:{company_id}"
+
+
+def _get_cached(key: str) -> dict | None:
+    if key in _ai_cache:
+        ts, data = _ai_cache[key]
+        if time.time() - ts < _AI_CACHE_TTL:
+            return data
+        del _ai_cache[key]
+    return None
+
+
+def _set_cached(key: str, data: dict) -> None:
+    # Evict stale entries if cache grows too large
+    if len(_ai_cache) > 200:
+        now = time.time()
+        stale = [k for k, (ts, _) in _ai_cache.items() if now - ts > _AI_CACHE_TTL]
+        for k in stale:
+            del _ai_cache[k]
+    _ai_cache[key] = (time.time(), data)
 
 
 def get_available_models() -> list[dict]:
@@ -80,6 +109,9 @@ def get_available_models() -> list[dict]:
 
 
 async def analyze_project_risk(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("project_risk", company_id))
+    if cached:
+        return cached
     today = date.today()
     thirty_days_ago = today - timedelta(days=30)
 
@@ -153,15 +185,20 @@ async def analyze_project_risk(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt, model=get_model_for_task("reasoning"))
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "risks": [], "recommendations": []}
+        parsed = {"summary": result, "risks": [], "recommendations": []}
     except Exception as e:
         logger.error(f"AI project risk analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "risks": [], "recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "risks": [], "recommendations": []}
+    _set_cached(_cache_key("project_risk", company_id), parsed)
+    return parsed
 
 
 async def analyze_station_revenue(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("station_revenue", company_id))
+    if cached:
+        return cached
     three_months_ago = (date.today().replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
 
     stations = (await db.execute(
@@ -256,15 +293,20 @@ async def analyze_station_revenue(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "analysis": [], "recommendations": []}
+        parsed = {"summary": result, "analysis": [], "recommendations": []}
     except Exception as e:
         logger.error(f"AI station revenue analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "analysis": [], "recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "analysis": [], "recommendations": []}
+    _set_cached(_cache_key("station_revenue", company_id), parsed)
+    return parsed
 
 
 async def analyze_finance_health(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("finance_health", company_id))
+    if cached:
+        return cached
     today = date.today()
     current_month = today.strftime("%Y-%m")
     three_months_ago_month = (today.replace(day=1) - timedelta(days=90)).strftime("%Y-%m")
@@ -364,15 +406,20 @@ async def analyze_finance_health(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "risk_items": [], "recommendations": []}
+        parsed = {"summary": result, "risk_items": [], "recommendations": []}
     except Exception as e:
         logger.error(f"AI finance analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "risk_items": [], "recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "risk_items": [], "recommendations": []}
+    _set_cached(_cache_key("finance_health", company_id), parsed)
+    return parsed
 
 
 async def analyze_procurement(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("procurement", company_id))
+    if cached:
+        return cached
     suppliers = (await db.execute(
         select(Supplier).where(
             Supplier.company_id == company_id,
@@ -435,15 +482,20 @@ async def analyze_procurement(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "supplier_analysis": {}, "recommendations": []}
+        parsed = {"summary": result, "supplier_analysis": {}, "recommendations": []}
     except Exception as e:
         logger.error(f"AI procurement analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "supplier_analysis": {}, "recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "supplier_analysis": {}, "recommendations": []}
+    _set_cached(_cache_key("procurement", company_id), parsed)
+    return parsed
 
 
 async def analyze_cross_business(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("cross_business", company_id))
+    if cached:
+        return cached
     today = date.today()
     current_month = today.strftime("%Y-%m")
 
@@ -551,15 +603,20 @@ async def analyze_cross_business(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "board_overview": {}, "resource_allocation": [], "strategic_recommendations": []}
+        parsed = {"summary": result, "board_overview": {}, "resource_allocation": [], "strategic_recommendations": []}
     except Exception as e:
         logger.error(f"AI cross-business analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "board_overview": {}, "resource_allocation": [], "strategic_recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "board_overview": {}, "resource_allocation": [], "strategic_recommendations": []}
+    _set_cached(_cache_key("cross_business", company_id), parsed)
+    return parsed
 
 
 async def analyze_device_health(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("device_health", company_id))
+    if cached:
+        return cached
     stations = (await db.execute(
         select(ChargingStation).where(
             ChargingStation.company_id == company_id,
@@ -604,15 +661,20 @@ async def analyze_device_health(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "devices_at_risk": [], "maintenance_plan": []}
+        parsed = {"summary": result, "devices_at_risk": [], "maintenance_plan": []}
     except Exception as e:
         logger.error(f"AI device health analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "devices_at_risk": [], "maintenance_plan": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "devices_at_risk": [], "maintenance_plan": []}
+    _set_cached(_cache_key("device_health", company_id), parsed)
+    return parsed
 
 
 async def analyze_customer_churn(db: AsyncSession, company_id: str) -> dict:
+    cached = _get_cached(_cache_key("customer_churn", company_id))
+    if cached:
+        return cached
     fleets = (await db.execute(
         select(FleetCustomer).where(
             FleetCustomer.company_id == company_id,
@@ -657,15 +719,20 @@ async def analyze_customer_churn(db: AsyncSession, company_id: str) -> dict:
 
     try:
         result = await _call_ai(system_prompt, user_prompt)
-        return json.loads(result)
+        parsed = json.loads(result)
     except json.JSONDecodeError:
-        return {"summary": result, "at_risk_customers": [], "recommendations": []}
+        parsed = {"summary": result, "at_risk_customers": [], "recommendations": []}
     except Exception as e:
         logger.error(f"AI customer churn analysis failed: {e}")
-        return {"summary": f"AI分析暂时不可用: {str(e)}", "at_risk_customers": [], "recommendations": []}
+        parsed = {"summary": f"AI分析暂时不可用: {str(e)}", "at_risk_customers": [], "recommendations": []}
+    _set_cached(_cache_key("customer_churn", company_id), parsed)
+    return parsed
 
 
 async def generate_daily_briefing(db: AsyncSession, company_id: str, user_id: str) -> dict:
+    cached = _get_cached(_cache_key("daily_briefing", company_id))
+    if cached:
+        return cached
     today = date.today()
 
     project_stats = (await db.execute(
@@ -741,9 +808,10 @@ async def generate_daily_briefing(db: AsyncSession, company_id: str, user_id: st
         result = await _call_ai(system_prompt, user_prompt)
         briefing = json.loads(result)
         briefing["raw_data"] = data
-        return briefing
     except Exception as e:
-        return {"greeting": "早上好", "headline": "简报生成失败", "alerts": [], "highlights": [], "todo_suggestions": [], "closing": "", "raw_data": data}
+        briefing = {"greeting": "早上好", "headline": "简报生成失败", "alerts": [], "highlights": [], "todo_suggestions": [], "closing": "", "raw_data": data}
+    _set_cached(_cache_key("daily_briefing", company_id), briefing)
+    return briefing
 
 
 async def execute_ai_task(db: AsyncSession, company_id: str, user_id: str, task_type: str, params: dict) -> dict:

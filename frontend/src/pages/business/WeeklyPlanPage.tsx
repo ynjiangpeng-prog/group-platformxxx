@@ -42,7 +42,7 @@ export default function WeeklyPlanPage() {
 
   const openCreate = () => { setForm(defaultForm); setEditId(null); setDialogOpen(true); };
   const openEdit = (item: any) => { setForm({ project_id: item.project_id ?? "", week_start: item.week_start ?? "", week_end: item.week_end ?? "", week_no: String(item.week_no ?? ""), objectives: item.objectives ?? "", key_tasks: item.key_tasks ?? "", resource_plan: item.resource_plan ?? "", risk_assessment: item.risk_assessment ?? "", status: item.status ?? "draft", reviewer_id: item.reviewer_id ?? "" }); setEditId(item.id); setDialogOpen(true); };
-  const submit = () => { const payload = { ...form, week_no: Number(form.week_no) || 0 }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
+  const submit = () => { const payload = { ...form, week_no: Number(form.week_no) || 0, week_start: form.week_start || undefined, week_end: form.week_end || undefined }; editId ? updateMut.mutate({ id: editId, data: payload }) : createMut.mutate(payload); };
 
   if (isLoading) return <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>;
 

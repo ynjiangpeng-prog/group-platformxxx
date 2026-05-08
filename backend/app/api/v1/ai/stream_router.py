@@ -1,58 +1,66 @@
 """
 AI流式输出API
-支持打字机效果的流式响应
+支持打字机效果的流式响应，使用真实AI提供商
 """
-from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth import get_current_user, get_db
 from app.models.organization import User
+from app.services.ai_gateway import ai_gateway
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["AI流式对话"])
 
 
+class StreamChatRequest(BaseModel):
+    message: str = Field(..., description="用户消息")
+    model: str | None = Field(None, description="模型名称(可选)")
+    history: list[dict] | None = Field(None, description="对话历史")
+
+
 @router.post("/chat")
 async def chat_stream(
-    body: dict,
+    body: StreamChatRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    AI流式对话
-    返回SSE格式的流式响应
-    """
-    message = body.get("message", "")
-    
+    """AI流式对话，返回SSE格式的流式响应"""
+    messages = body.history or []
+    messages.append({"role": "user", "content": body.message})
+
     async def generate():
-        """模拟流式输出（实际应调用AI API）"""
-        import asyncio
-        
-        # 模拟AI思考过程
-        response_text = f"收到您的问题：{message}\n\n这是AI的流式回复示例。在实际环境中，这里会调用真实的AI API，并以打字机效果逐字输出。\n\n系统状态：运行正常\n时间：{datetime.now().isoformat()}"
-        
-        words = response_text.split(" ")
-        for i, word in enumerate(words):
-            chunk = {
-                "id": f"chat-{i}",
+        try:
+            stream = ai_gateway.provider.stream_chat(
+                messages,
+                model=body.model,
+            )
+            async for content in stream:
+                chunk = {"role": "assistant", "content": content, "done": False}
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            logger.error(f"Stream chat error: {e}")
+            error_chunk = {
                 "role": "assistant",
-                "content": word + " ",
-                "done": False
+                "content": f"\n\n[错误] AI服务暂时不可用: {str(e)}",
+                "done": True,
             }
-            yield f"data: {json.dumps(chunk)}\n\n"
-            await asyncio.sleep(0.05)  # 模拟打字机效果
-        
-        # 结束标记
-        yield f"data: {json.dumps({'done': True})}\n\n"
-    
-    from datetime import datetime
-    
+            yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+            "X-Accel-Buffering": "no",
+        },
     )
