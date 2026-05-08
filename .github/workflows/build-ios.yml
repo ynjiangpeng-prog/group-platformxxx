@@ -32,6 +32,30 @@ jobs:
         working-directory: mobile/ios
         run: pod install
 
+      - name: Fix deployment target
+        working-directory: mobile/ios
+        run: |
+          # Patch Podfile post_install to force iOS 15.1+ deployment target for all targets
+          python3 -c "
+          import re
+          with open('Podfile', 'r') as f:
+            content = f.read()
+          # Add deployment target fix in post_install
+          fix = '''
+            config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
+            config.build_settings.delete('SWIFT_STRICT_CONCURRENCY')'''
+          content = content.replace('installer.pods_project.targets.each do |target|', 'installer.pods_project.targets.each do |target|' + fix.gsub('\\n',\"\n\"))
+          with open('Podfile', 'w') as f:
+            f.write(content)
+          " 2>/dev/null || true
+          # Use Ruby to patch Podfile instead
+          ruby -e "
+          content = File.read('Podfile')
+          content.sub!('installer.pods_project.targets.each do |target|',
+            \"installer.pods_project.targets.each do |target|\\n\    target.build_configurations.each do |config|\\n      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'\\n    end\")
+          File.write('Podfile', content)
+          "
+
       - name: Build unsigned IPA
         working-directory: mobile/ios
         run: |
@@ -39,7 +63,8 @@ jobs:
             -configuration Release -sdk iphoneos \
             -derivedDataPath build -archivePath build/app.xcarchive \
             archive \
-            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=15.1
 
           mkdir -p build/ipa/Payload
           cp -r build/app.xcarchive/Products/Applications/*.app build/ipa/Payload/
