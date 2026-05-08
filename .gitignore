@@ -1,1 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
 frontend/dist/
+mobile/web-build/
+mobile/ios/
+mobile/android/
+
+# Expo
+mobile/.expo/
+mobile/dist/
+
+# EAS
+mobile/*.jks
+mobile/*.p12
+mobile/*.mobileprovision
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
