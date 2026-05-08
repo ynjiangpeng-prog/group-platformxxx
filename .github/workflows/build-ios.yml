@@ -29,11 +29,19 @@ jobs:
         working-directory: mobile/ios
         run: pod install
 
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          xcodebuild -version
+
       - name: Build unsigned IPA
         working-directory: mobile/ios
         run: |
           WORKSPACE=$(ls -d *.xcworkspace | head -1)
-          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | sed -n '/Schemes:/,$ p' | tail -n +2 | head -1 | xargs)
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | grep -A20 "Schemes:" | grep "^[[:space:]]*mobile$" | xargs)
+          if [ -z "$SCHEME" ]; then
+            SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | grep -A20 "Schemes:" | head -2 | tail -1 | xargs)
+          fi
           echo "Workspace: $WORKSPACE"
           echo "Scheme: $SCHEME"
 
@@ -41,7 +49,9 @@ jobs:
             -configuration Release -sdk iphoneos \
             -derivedDataPath build -archivePath build/app.xcarchive \
             archive \
-            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            GCC_WARN_INHIBIT_ALL_WARNINGS=NO
 
           mkdir -p build/ipa/Payload
           cp -r build/app.xcarchive/Products/Applications/*.app build/ipa/Payload/
