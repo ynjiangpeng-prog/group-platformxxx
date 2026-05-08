@@ -37,15 +37,7 @@ jobs:
       - name: Build unsigned IPA
         working-directory: mobile/ios
         run: |
-          WORKSPACE=$(ls -d *.xcworkspace | head -1)
-          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | grep -A20 "Schemes:" | grep "^[[:space:]]*mobile$" | xargs)
-          if [ -z "$SCHEME" ]; then
-            SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | grep -A20 "Schemes:" | head -2 | tail -1 | xargs)
-          fi
-          echo "Workspace: $WORKSPACE"
-          echo "Scheme: $SCHEME"
-
-          xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" \
+          xcodebuild -workspace mobile.xcworkspace -scheme mobile \
             -configuration Release -sdk iphoneos \
             -derivedDataPath build -archivePath build/app.xcarchive \
             archive \
