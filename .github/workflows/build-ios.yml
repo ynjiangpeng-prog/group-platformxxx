@@ -26,24 +26,45 @@ jobs:
         run: |
           npx expo prebuild --platform ios --clean
 
+      - name: Detect workspace and scheme
+        working-directory: mobile/ios
+        run: |
+          echo "=== Listing ios directory ==="
+          ls -la
+          WORKSPACE=$(ls *.xcworkspace 2>/dev/null | head -1)
+          echo "WORKSPACE=$WORKSPACE" >> $GITHUB_ENV
+          if [ -n "$WORKSPACE" ]; then
+            SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+            echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          else
+            PROJECT=$(ls *.xcodeproj 2>/dev/null | head -1)
+            echo "PROJECT=$PROJECT" >> $GITHUB_ENV
+            SCHEME=$(xcodebuild -project "$PROJECT" -list 2>/dev/null | grep -A1 "Schemes:" | tail -1 | xargs)
+            echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          fi
+          echo "Workspace: $WORKSPACE"
+          echo "Project: $PROJECT"
+          echo "Scheme: $SCHEME"
+
       - name: Build unsigned IPA
         working-directory: mobile/ios
         run: |
-          xcodebuild \
-            -workspace mobile.xcworkspace \
-            -scheme mobile \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            -archivePath build/mobile.xcarchive \
-            archive \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            GCC_PREPROCESSOR_DEFINITIONS='$(GCC_PREPROCESSOR_DEFINITIONS) DEBUG=0'
+          if [ -n "$WORKSPACE" ]; then
+            xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" \
+              -configuration Release -sdk iphoneos \
+              -derivedDataPath build -archivePath build/app.xcarchive \
+              archive \
+              CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          else
+            xcodebuild -project "$PROJECT" -scheme "$SCHEME" \
+              -configuration Release -sdk iphoneos \
+              -derivedDataPath build -archivePath build/app.xcarchive \
+              archive \
+              CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          fi
 
           mkdir -p build/ipa/Payload
-          cp -r build/mobile.xcarchive/Products/Applications/mobile.app build/ipa/Payload/
+          cp -r build/app.xcarchive/Products/Applications/*.app build/ipa/Payload/
           cd build/ipa
           zip -r ${{ github.workspace }}/mobile/mobile-unsigned.ipa Payload/
 
