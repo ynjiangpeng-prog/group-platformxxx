@@ -17,6 +17,9 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
+      - name: Show Xcode version
+        run: xcodebuild -version
+
       - name: Install dependencies
         working-directory: mobile
         run: npm ci
@@ -29,11 +32,6 @@ jobs:
         working-directory: mobile/ios
         run: pod install
 
-      - name: Select Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
-          xcodebuild -version
-
       - name: Build unsigned IPA
         working-directory: mobile/ios
         run: |
@@ -41,9 +39,7 @@ jobs:
             -configuration Release -sdk iphoneos \
             -derivedDataPath build -archivePath build/app.xcarchive \
             archive \
-            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            GCC_WARN_INHIBIT_ALL_WARNINGS=NO
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
 
           mkdir -p build/ipa/Payload
           cp -r build/app.xcarchive/Products/Applications/*.app build/ipa/Payload/
